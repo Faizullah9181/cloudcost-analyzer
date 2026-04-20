@@ -1,0 +1,26 @@
+[MAIN]
+load-plugins=pylint.extensions.docparams
+
+[FORMAT]
+max-line-length=120
+indent-string='    '
+
+[MESSAGES CONTROL]
+disable=
+    C0114, # missing-module-docstring
+    C0115, # missing-class-docstring
+    C0116, # missing-function-docstring
+    R0903, # too-few-public-methods
+    W0613, # unused-argument
+    C0411, # wrong-import-order
+
+[DESIGN]
+max-args=8
+max-locals=20
+
+[SIMILARITIES]
+min-similarity-lines=6
+
+[TYPECHECK]
+ignored-modules=strands
+ignored-classes=strands.Agent
