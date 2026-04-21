@@ -13,6 +13,7 @@ Natural language AWS cost analysis powered by [Strands Agents](https://github.co
 - **Multi-Account** — Support for AWS Organizations multi-account analysis
 - **Cost Forecasting** — Predicted spend based on current usage patterns
 - **Optimization Tips** — AI-generated cost reduction recommendations
+- **A2UI Output** — Every analysis includes schema-aligned A2UI message JSON for agent-to-UI rendering
 - **Multi-LLM Support** — Bedrock, OpenAI, Anthropic, or Ollama
 
 ## Tech Stack
@@ -51,7 +52,7 @@ docker compose up --build
 ```
 
 - Frontend: [http://localhost:5035](http://localhost:5035)
-- Backend API: [http://localhost:8000](http://localhost:8000)
+- Backend API: [http://localhost:8001](http://localhost:8001)
 
 ### 3. Local development (without Docker)
 

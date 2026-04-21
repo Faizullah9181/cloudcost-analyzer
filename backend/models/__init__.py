@@ -51,6 +51,7 @@ class AnalysisResult(BaseModel):
     recommendations: list[str] = []
     raw_response: str = ""
     chart_type: str = "bar"  # bar | line | pie | area
+    a2ui_messages: list[dict[str, Any]] = []
 
 
 class QueryResponse(BaseModel):

@@ -28,6 +28,7 @@ export interface AnalysisResult {
   recommendations: string[];
   raw_response: string;
   chart_type: 'bar' | 'line' | 'pie' | 'area';
+  a2ui_messages: Array<Record<string, unknown>>;
 }
 
 export interface QueryResponse {

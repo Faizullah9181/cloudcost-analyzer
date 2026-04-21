@@ -9,6 +9,7 @@ from typing import Any
 
 from strands import Agent
 
+from a2ui import build_cost_analysis_a2ui_messages
 from agents.tools.aws_cost_tools import cost_tools
 from config import settings
 
@@ -161,37 +162,41 @@ def analyze_costs(query: str) -> dict[str, Any]:
 
         parsed = _extract_json(raw_text)
         if parsed:
+            analysis_data = {
+                "summary": parsed.get("summary", ""),
+                "total_cost": parsed.get("total_cost", 0),
+                "currency": parsed.get("currency", "USD"),
+                "period": parsed.get("period", ""),
+                "service_breakdown": parsed.get("service_breakdown", []),
+                "time_series": parsed.get("time_series", []),
+                "top_costs": parsed.get("top_costs", []),
+                "recommendations": parsed.get("recommendations", []),
+                "raw_response": raw_text,
+                "chart_type": parsed.get("chart_type", "bar"),
+            }
+            analysis_data["a2ui_messages"] = build_cost_analysis_a2ui_messages(analysis_data)
             return {
                 "success": True,
-                "data": {
-                    "summary": parsed.get("summary", ""),
-                    "total_cost": parsed.get("total_cost", 0),
-                    "currency": parsed.get("currency", "USD"),
-                    "period": parsed.get("period", ""),
-                    "service_breakdown": parsed.get("service_breakdown", []),
-                    "time_series": parsed.get("time_series", []),
-                    "top_costs": parsed.get("top_costs", []),
-                    "recommendations": parsed.get("recommendations", []),
-                    "raw_response": raw_text,
-                    "chart_type": parsed.get("chart_type", "bar"),
-                },
+                "data": analysis_data,
             }
 
         # Fallback: return raw text as summary
+        fallback_data = {
+            "summary": raw_text,
+            "total_cost": 0,
+            "currency": "USD",
+            "period": "",
+            "service_breakdown": [],
+            "time_series": [],
+            "top_costs": [],
+            "recommendations": [],
+            "raw_response": raw_text,
+            "chart_type": "bar",
+        }
+        fallback_data["a2ui_messages"] = build_cost_analysis_a2ui_messages(fallback_data)
         return {
             "success": True,
-            "data": {
-                "summary": raw_text,
-                "total_cost": 0,
-                "currency": "USD",
-                "period": "",
-                "service_breakdown": [],
-                "time_series": [],
-                "top_costs": [],
-                "recommendations": [],
-                "raw_response": raw_text,
-                "chart_type": "bar",
-            },
+            "data": fallback_data,
         }
 
     except Exception as exc:

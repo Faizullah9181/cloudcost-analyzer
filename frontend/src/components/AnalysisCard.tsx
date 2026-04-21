@@ -1,7 +1,7 @@
 import type { AnalysisResult } from '../types';
 import CostChart from './CostChart';
 import ServiceBreakdown from './ServiceBreakdown';
-import { DollarSign, TrendingUp, Lightbulb, Calendar } from 'lucide-react';
+import { DollarSign, TrendingUp, Lightbulb, Calendar, Braces } from 'lucide-react';
 
 interface AnalysisCardProps {
   data: AnalysisResult;
@@ -83,6 +83,24 @@ export default function AnalysisCard({ data }: AnalysisCardProps) {
               </li>
             ))}
           </ul>
+        </div>
+      )}
+
+      {/* A2UI Payload */}
+      {(data.a2ui_messages?.length ?? 0) > 0 && (
+        <div className="bg-gray-800/50 rounded-xl p-5 border border-primary-800/40">
+          <div className="flex items-center gap-2 mb-3 text-primary-300">
+            <Braces className="w-4 h-4" />
+            <h3 className="text-sm font-semibold">A2UI Messages ({data.a2ui_messages.length})</h3>
+          </div>
+          <details>
+            <summary className="text-xs text-gray-400 cursor-pointer hover:text-gray-300">
+              View generated A2UI JSON payload
+            </summary>
+            <pre className="mt-3 max-h-72 overflow-auto text-[11px] leading-relaxed bg-gray-900/70 border border-gray-700 rounded-lg p-3 text-gray-200 custom-scrollbar">
+              {JSON.stringify(data.a2ui_messages, null, 2)}
+            </pre>
+          </details>
         </div>
       )}
     </div>
