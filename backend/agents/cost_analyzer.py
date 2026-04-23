@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from typing import Any
 
 from strands import Agent
@@ -14,6 +16,9 @@ from agents.tools.aws_cost_tools import cost_tools
 from config import settings
 
 logger = logging.getLogger(__name__)
+
+_unsloth_token: str | None = None
+_unsloth_active_model: str | None = None
 
 SYSTEM_PROMPT = """You are Cloud Analytics Agent — an expert AWS cloud cost analyst.
 
@@ -77,8 +82,24 @@ def _build_agent() -> Agent:
         from strands.models.openai import OpenAIModel
 
         model = OpenAIModel(
-            model="gpt-4o",
+            model=settings.openai_model,
             client_args={"api_key": settings.openai_api_key},
+        )
+        model_kwargs["model"] = model
+
+    elif settings.llm_provider == "gemini":
+        from strands.models.openai import OpenAIModel
+
+        if not settings.gemini_api_key:
+            raise ValueError("GEMINI_API_KEY is required when LLM_PROVIDER=gemini")
+
+        # Gemini exposes an OpenAI-compatible endpoint.
+        model = OpenAIModel(
+            model=settings.gemini_model,
+            client_args={
+                "api_key": settings.gemini_api_key,
+                "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+            },
         )
         model_kwargs["model"] = model
 
@@ -100,12 +121,108 @@ def _build_agent() -> Agent:
         )
         model_kwargs["model"] = model
 
+    elif settings.llm_provider == "unsloth":
+        from strands.models.openai import OpenAIModel
+
+        try:
+            unsloth_token = _unsloth_login()
+            model_name = settings.unsloth_model or _unsloth_get_active_model(
+                unsloth_token
+            )
+            model = OpenAIModel(
+                model=model_name,
+                client_args={
+                    "api_key": unsloth_token,
+                    "base_url": f"{settings.unsloth_base_url.rstrip('/')}/v1",
+                },
+            )
+        except RuntimeError as exc:
+            if not settings.gemini_api_key:
+                raise RuntimeError(
+                    "Unsloth is unavailable and GEMINI_API_KEY is not configured for fallback"
+                ) from exc
+            logger.warning(
+                "Unsloth unavailable, falling back to Gemini model '%s'",
+                settings.gemini_model,
+            )
+            model = OpenAIModel(
+                model=settings.gemini_model,
+                client_args={
+                    "api_key": settings.gemini_api_key,
+                    "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+                },
+            )
+        model_kwargs["model"] = model
+
     agent = Agent(
         system_prompt=SYSTEM_PROMPT,
         tools=cost_tools,
         **model_kwargs,
     )
     return agent
+
+
+def _unsloth_login() -> str:
+    """Authenticate with Unsloth Studio and return bearer token."""
+    global _unsloth_token  # noqa: PLW0603
+    if _unsloth_token:
+        return _unsloth_token
+
+    login_url = f"{settings.unsloth_base_url.rstrip('/')}/api/auth/login"
+    payload = json.dumps(
+        {
+            "username": settings.unsloth_username,
+            "password": settings.unsloth_password,
+        }
+    ).encode("utf-8")
+
+    request = Request(
+        login_url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urlopen(request, timeout=10) as response:
+            body = response.read().decode("utf-8", errors="replace")
+            parsed = json.loads(body)
+            token = str(parsed.get("access_token", "")).strip()
+            if not token:
+                raise RuntimeError("Unsloth login response missing access_token")
+            _unsloth_token = token
+            return token
+    except (HTTPError, URLError, TimeoutError, ValueError) as exc:
+        raise RuntimeError("Unable to authenticate to Unsloth Studio") from exc
+
+
+def _unsloth_get_active_model(token: str) -> str:
+    """Get active model from Unsloth status endpoint."""
+    global _unsloth_active_model  # noqa: PLW0603
+    if _unsloth_active_model:
+        return _unsloth_active_model
+
+    status_url = f"{settings.unsloth_base_url.rstrip('/')}/v1/status"
+    request = Request(
+        status_url,
+        headers={"Authorization": f"Bearer {token}"},
+        method="GET",
+    )
+
+    try:
+        with urlopen(request, timeout=10) as response:
+            body = response.read().decode("utf-8", errors="replace")
+            parsed = json.loads(body)
+            model = str(parsed.get("active_model", "")).strip()
+            if model:
+                _unsloth_active_model = model
+                return model
+    except (HTTPError, URLError, TimeoutError, ValueError):
+        logger.warning(
+            "Unable to auto-detect Unsloth active model; using fallback model name"
+        )
+
+    return "default"
 
 
 # Module-level agent instance (lazy init)
@@ -174,7 +291,9 @@ def analyze_costs(query: str) -> dict[str, Any]:
                 "raw_response": raw_text,
                 "chart_type": parsed.get("chart_type", "bar"),
             }
-            analysis_data["a2ui_messages"] = build_cost_analysis_a2ui_messages(analysis_data)
+            analysis_data["a2ui_messages"] = build_cost_analysis_a2ui_messages(
+                analysis_data
+            )
             return {
                 "success": True,
                 "data": analysis_data,
@@ -193,7 +312,9 @@ def analyze_costs(query: str) -> dict[str, Any]:
             "raw_response": raw_text,
             "chart_type": "bar",
         }
-        fallback_data["a2ui_messages"] = build_cost_analysis_a2ui_messages(fallback_data)
+        fallback_data["a2ui_messages"] = build_cost_analysis_a2ui_messages(
+            fallback_data
+        )
         return {
             "success": True,
             "data": fallback_data,

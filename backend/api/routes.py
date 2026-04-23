@@ -57,7 +57,9 @@ async def analyze(request: QueryRequest):
     result = analyze_costs(request.query)
 
     if not result.get("success"):
-        raise HTTPException(status_code=500, detail=result.get("error", "Analysis failed"))
+        raise HTTPException(
+            status_code=500, detail=result.get("error", "Analysis failed")
+        )
 
     return QueryResponse(success=True, data=result.get("data"))
 

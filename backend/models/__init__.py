@@ -10,7 +10,12 @@ from pydantic import BaseModel, Field
 class QueryRequest(BaseModel):
     """Natural language query from the user."""
 
-    query: str = Field(..., min_length=1, max_length=2000, description="Natural language query about AWS costs")
+    query: str = Field(
+        ...,
+        min_length=1,
+        max_length=2000,
+        description="Natural language query about AWS costs",
+    )
 
 
 class CostDataPoint(BaseModel):

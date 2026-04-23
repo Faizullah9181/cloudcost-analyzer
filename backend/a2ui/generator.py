@@ -12,7 +12,9 @@ def _safe_text(value: Any, fallback: str = "") -> str:
     return str(value)
 
 
-def _text_component(component_id: str, text: str, usage_hint: str = "body") -> dict[str, Any]:
+def _text_component(
+    component_id: str, text: str, usage_hint: str = "body"
+) -> dict[str, Any]:
     """Build a basic A2UI Text component."""
     return {
         "id": component_id,
@@ -82,7 +84,9 @@ def build_cost_analysis_a2ui_messages(data: dict[str, Any]) -> list[dict[str, An
                     "children": {
                         "explicitList": [
                             f"service-{index}"
-                            for index in range(len(service_items) if service_items else 1)
+                            for index in range(
+                                len(service_items) if service_items else 1
+                            )
                         ]
                     }
                 }
@@ -95,7 +99,8 @@ def build_cost_analysis_a2ui_messages(data: dict[str, Any]) -> list[dict[str, An
                 "Column": {
                     "children": {
                         "explicitList": [
-                            f"rec-{index}" for index in range(len(rec_items) if rec_items else 1)
+                            f"rec-{index}"
+                            for index in range(len(rec_items) if rec_items else 1)
                         ]
                     }
                 }
@@ -107,13 +112,21 @@ def build_cost_analysis_a2ui_messages(data: dict[str, Any]) -> list[dict[str, An
         for index, service_line in enumerate(service_items):
             components.append(_text_component(f"service-{index}", service_line, "body"))
     else:
-        components.append(_text_component("service-0", "No service-level cost data available.", "caption"))
+        components.append(
+            _text_component(
+                "service-0", "No service-level cost data available.", "caption"
+            )
+        )
 
     if rec_items:
         for index, rec_line in enumerate(rec_items):
             components.append(_text_component(f"rec-{index}", rec_line, "body"))
     else:
-        components.append(_text_component("rec-0", "No optimization recommendations available.", "caption"))
+        components.append(
+            _text_component(
+                "rec-0", "No optimization recommendations available.", "caption"
+            )
+        )
 
     return [
         {

@@ -68,7 +68,11 @@ def get_monthly_cost_breakdown(months: int = 3) -> str:
                 cost = float(group["Metrics"]["UnblendedCost"]["Amount"])
                 if cost > 0.01:
                     results.append(
-                        {"date": period_start, "service": service, "cost": round(cost, 2)}
+                        {
+                            "date": period_start,
+                            "service": service,
+                            "cost": round(cost, 2),
+                        }
                     )
 
         return json.dumps(
@@ -107,14 +111,18 @@ def get_daily_cost_trend(days: int = 30) -> str:
         results = []
         for period in response.get("ResultsByTime", []):
             cost = float(period["Total"]["UnblendedCost"]["Amount"])
-            results.append({"date": period["TimePeriod"]["Start"], "cost": round(cost, 2)})
+            results.append(
+                {"date": period["TimePeriod"]["Start"], "cost": round(cost, 2)}
+            )
 
         return json.dumps(
             {
                 "period": f"{start_date} to {end_date}",
                 "data": results,
                 "total": round(sum(r["cost"] for r in results), 2),
-                "average_daily": round(sum(r["cost"] for r in results) / max(len(results), 1), 2),
+                "average_daily": round(
+                    sum(r["cost"] for r in results) / max(len(results), 1), 2
+                ),
             }
         )
     except (ClientError, NoCredentialsError) as e:

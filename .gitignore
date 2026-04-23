@@ -32,3 +32,4 @@ docker-compose.override.yml
 .coverage
 htmlcov/
 .pytest_cache/
+*downloader.py

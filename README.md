@@ -14,7 +14,7 @@ Natural language AWS cost analysis powered by [Strands Agents](https://github.co
 - **Cost Forecasting** — Predicted spend based on current usage patterns
 - **Optimization Tips** — AI-generated cost reduction recommendations
 - **A2UI Output** — Every analysis includes schema-aligned A2UI message JSON for agent-to-UI rendering
-- **Multi-LLM Support** — Bedrock, OpenAI, Anthropic, or Ollama
+- **Multi-LLM Support** — Bedrock, OpenAI, Anthropic, Ollama, Gemini, or Unsloth Studio
 
 ## Tech Stack
 
