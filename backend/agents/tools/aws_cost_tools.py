@@ -10,7 +10,10 @@ import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
 from strands import tool
 
-from config import settings
+try:
+    from backend.config import settings
+except ImportError:
+    from config import settings
 
 logger = logging.getLogger(__name__)
 
