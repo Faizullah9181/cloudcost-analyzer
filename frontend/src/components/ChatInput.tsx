@@ -27,7 +27,7 @@ export default function ChatInput({ onSubmit, loading, suggestions }: ChatInputP
               key={s}
               onClick={() => { setQuery(s); onSubmit(s); }}
               disabled={loading}
-              className="text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 px-3 py-1.5 rounded-full border border-gray-700 transition-colors disabled:opacity-50"
+              className="text-xs bg-slate-900 hover:bg-slate-800 text-slate-300 px-3 py-1.5 rounded-full border border-slate-700 transition-colors disabled:opacity-50"
             >
               {s}
             </button>
@@ -35,19 +35,19 @@ export default function ChatInput({ onSubmit, loading, suggestions }: ChatInputP
         </div>
       )}
 
-      <form onSubmit={handleSubmit} className="flex gap-3">
+      <form onSubmit={handleSubmit} className="flex gap-3 rounded-2xl border border-slate-800 bg-slate-950/70 backdrop-blur p-3">
         <input
           type="text"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Ask about your AWS costs... e.g. 'What's my total spend this month?'"
+          placeholder="Ask about your cloud costs... e.g. 'Compare my AWS and Azure monthly spend'"
           disabled={loading}
-          className="flex-1 bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent disabled:opacity-50 text-sm"
+          className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent disabled:opacity-50 text-sm text-pretty"
         />
         <button
           type="submit"
           disabled={loading || !query.trim()}
-          className="bg-primary-600 hover:bg-primary-700 disabled:bg-gray-700 disabled:cursor-not-allowed text-white px-5 py-3 rounded-xl flex items-center gap-2 transition-colors font-medium text-sm"
+          className="bg-primary-600 hover:bg-primary-500 disabled:bg-slate-700 disabled:cursor-not-allowed text-white px-5 py-3 rounded-xl flex items-center gap-2 transition-colors font-medium text-sm"
         >
           {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
           Analyze

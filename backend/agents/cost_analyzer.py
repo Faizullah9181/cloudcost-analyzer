@@ -1,4 +1,4 @@
-"""Strands Agent for AWS Cloud Cost Analysis."""
+"""Strands Agent for Cloud Cost Analysis (Multi-Cloud Support)."""
 
 from __future__ import annotations
 
@@ -11,26 +11,75 @@ from typing import Any
 
 from strands import Agent
 
-from a2ui import build_cost_analysis_a2ui_messages
-from agents.tools.aws_cost_tools import cost_tools
-from config import settings
+try:
+    from backend.a2ui import build_cost_analysis_a2ui_messages
+    from backend.agents.tools.aws_cost_tools import cost_tools as aws_tools
+    from backend.agents.tools.azure_cost_tools import (
+        azure_cost_by_service,
+        azure_cost_daily_trend,
+        azure_resource_inventory,
+    )
+    from backend.agents.tools.gcp_billing_tools import (
+        gcp_billing_by_service,
+        gcp_cost_daily_trend,
+        gcp_resource_inventory,
+    )
+    from backend.agents.tools.digitalocean_tools import (
+        digitalocean_billing_summary,
+        digitalocean_resource_costs,
+        digitalocean_monthly_trend,
+    )
+    from backend.config import settings
+except ImportError:
+    from a2ui import build_cost_analysis_a2ui_messages
+    from agents.tools.aws_cost_tools import cost_tools as aws_tools
+    from agents.tools.azure_cost_tools import (
+        azure_cost_by_service,
+        azure_cost_daily_trend,
+        azure_resource_inventory,
+    )
+    from agents.tools.gcp_billing_tools import (
+        gcp_billing_by_service,
+        gcp_cost_daily_trend,
+        gcp_resource_inventory,
+    )
+    from agents.tools.digitalocean_tools import (
+        digitalocean_billing_summary,
+        digitalocean_resource_costs,
+        digitalocean_monthly_trend,
+    )
+    from config import settings
 
 logger = logging.getLogger(__name__)
 
 _unsloth_token: str | None = None
 _unsloth_active_model: str | None = None
 
-SYSTEM_PROMPT = """You are Cloud Analytics Agent — an expert AWS cloud cost analyst.
+# Combine all cloud provider tools
+_all_tools = [
+    *aws_tools,  # AWS tools
+    azure_cost_by_service,
+    azure_cost_daily_trend,
+    azure_resource_inventory,
+    gcp_billing_by_service,
+    gcp_cost_daily_trend,
+    gcp_resource_inventory,
+    digitalocean_billing_summary,
+    digitalocean_resource_costs,
+    digitalocean_monthly_trend,
+]
 
-Your job is to help users understand their AWS spending by answering natural language
-questions about costs, resources, and optimization opportunities.
+SYSTEM_PROMPT = """You are Shimo Agent — an expert multi-cloud cost analyst.
+
+Your job is to help users understand their cloud spending across AWS, Azure, GCP, and DigitalOcean
+by answering natural language questions about costs, resources, and optimization opportunities.
 
 CAPABILITIES:
-- Retrieve monthly/daily cost breakdowns by service, region, account, or tag
+- Retrieve cost breakdowns by service, region, account, or tag (per cloud)
+- Compare costs across multiple cloud providers
 - Show cost trends over time
-- Forecast future costs
-- List active AWS resources (EC2, S3, RDS, Lambda)
-- Provide cost optimization recommendations
+- List active resources across all configured clouds
+- Provide cloud-specific and multi-cloud optimization recommendations
 
 RESPONSE FORMAT — you MUST return valid JSON with this structure:
 {
@@ -38,14 +87,17 @@ RESPONSE FORMAT — you MUST return valid JSON with this structure:
   "total_cost": 123.45,
   "currency": "USD",
   "period": "2025-01-01 to 2025-03-31",
+  "providers": {
+    "aws": {"total": 100, "services": {}},
+    "azure": {"total": 50, "services": {}},
+    "gcp": {"total": 30, "services": {}},
+    "digitalocean": {"total": 20, "services": {}}
+  },
   "service_breakdown": [
-    {"service": "Amazon EC2", "cost": 80.00, "percentage": 65.0, "change": 5.2}
+    {"service": "Compute", "cost": 80.00, "percentage": 65.0, "change": 5.2}
   ],
   "time_series": [
     {"date": "2025-01", "cost": 40.00, "service": "Total"}
-  ],
-  "top_costs": [
-    {"label": "EC2 On-Demand", "value": 60.00, "unit": "USD"}
   ],
   "recommendations": [
     "Consider Reserved Instances for stable EC2 workloads to save ~30%"
@@ -55,6 +107,7 @@ RESPONSE FORMAT — you MUST return valid JSON with this structure:
 
 RULES:
 - Always call the appropriate tool(s) first to get real data
+- Support AWS, Azure, GCP, and DigitalOcean queries
 - If a tool returns an error, report it clearly in the summary
 - Use "bar" for service comparisons, "line" for time trends, "pie" for proportional breakdowns, "area" for cumulative trends
 - Always include actionable recommendations
@@ -156,7 +209,7 @@ def _build_agent() -> Agent:
 
     agent = Agent(
         system_prompt=SYSTEM_PROMPT,
-        tools=cost_tools,
+        tools=_all_tools,
         **model_kwargs,
     )
     return agent
