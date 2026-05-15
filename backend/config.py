@@ -9,11 +9,27 @@ class Settings(BaseSettings):
     app_name: str = "Cloud Analytics"
     debug: bool = False
 
+    # Database
+    database_url: str = "sqlite:///./cloud_analytics.db"
+
     # AWS
     aws_region: str = "us-east-1"
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""
     aws_session_token: str = ""
+
+    # Azure
+    azure_tenant_id: str = ""
+    azure_client_id: str = ""
+    azure_client_secret: str = ""
+    azure_subscription_id: str = ""
+
+    # GCP
+    gcp_project_id: str = ""
+    gcp_service_account_json: str = ""  # Path or JSON string
+
+    # DigitalOcean
+    digitalocean_api_token: str = ""
 
     # LLM Provider
     llm_provider: str = (
