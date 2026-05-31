@@ -7,3 +7,23 @@ pydantic==2.11.3
 pydantic-settings==2.9.1
 python-dotenv==1.1.0
 pylint==3.3.7
+
+# Database & ORM
+sqlalchemy==2.0.36
+alembic==1.15.2
+
+# Azure
+azure-identity==1.15.0
+azure-mgmt-costmanagement==4.0.1
+azure-mgmt-subscription==3.1.1
+
+# GCP
+google-cloud-billing==1.13.0
+
+# DigitalOcean
+requests==2.32.3
+
+# CLI & TUI
+typer==0.12.5
+rich==14.0.0
+click==8.1.7

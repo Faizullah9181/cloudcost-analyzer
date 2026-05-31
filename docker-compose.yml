@@ -10,9 +10,13 @@ services:
       - .env
     environment:
       - PYTHONUNBUFFERED=1
+      - DATABASE_URL=sqlite:///./cloud_analytics.db
     volumes:
       - ./backend:/app
+      - ./data:/app/data
     restart: unless-stopped
+    networks:
+      - shimo-network
 
   frontend:
     build:
@@ -24,3 +28,13 @@ services:
     depends_on:
       - backend
     restart: unless-stopped
+    networks:
+      - shimo-network
+
+networks:
+  shimo-network:
+    driver: bridge
+
+volumes:
+  data:
+    driver: local
