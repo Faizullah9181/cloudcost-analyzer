@@ -33,3 +33,4 @@ docker-compose.override.yml
 htmlcov/
 .pytest_cache/
 *downloader.py
+cloud_analytics.db
