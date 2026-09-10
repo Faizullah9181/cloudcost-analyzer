@@ -1,378 +1,355 @@
-"""Strands Agent for Cloud Cost Analysis (Multi-Cloud Support)."""
+"""Agent construction and response parsing for multi-cloud cost analysis.
+
+This module is stateless. ``AgentHarness`` adds memory and persistence on top;
+``analyze_costs`` is the one-shot path used by the legacy ``/api/analyze`` endpoint.
+"""
 
 from __future__ import annotations
 
 import json
 import logging
 import re
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from collections.abc import Callable
 from typing import Any
 
 from strands import Agent
+from strands.agent.conversation_manager import SlidingWindowConversationManager
+from strands.agent.agent_result import AgentResult
+from strands.models.model import Model
 
-try:
-    from backend.a2ui import build_cost_analysis_a2ui_messages
-    from backend.agents.tools.aws_cost_tools import cost_tools as aws_tools
-    from backend.agents.tools.azure_cost_tools import (
-        azure_cost_by_service,
-        azure_cost_daily_trend,
-        azure_resource_inventory,
-    )
-    from backend.agents.tools.gcp_billing_tools import (
-        gcp_billing_by_service,
-        gcp_cost_daily_trend,
-        gcp_resource_inventory,
-    )
-    from backend.agents.tools.digitalocean_tools import (
-        digitalocean_billing_summary,
-        digitalocean_resource_costs,
-        digitalocean_monthly_trend,
-    )
-    from backend.config import settings
-except ImportError:
-    from a2ui import build_cost_analysis_a2ui_messages
-    from agents.tools.aws_cost_tools import cost_tools as aws_tools
-    from agents.tools.azure_cost_tools import (
-        azure_cost_by_service,
-        azure_cost_daily_trend,
-        azure_resource_inventory,
-    )
-    from agents.tools.gcp_billing_tools import (
-        gcp_billing_by_service,
-        gcp_cost_daily_trend,
-        gcp_resource_inventory,
-    )
-    from agents.tools.digitalocean_tools import (
-        digitalocean_billing_summary,
-        digitalocean_resource_costs,
-        digitalocean_monthly_trend,
-    )
-    from config import settings
+from backend.a2ui import build_cost_analysis_a2ui_messages
+from backend.agents.llm import build_model
+from backend.agents.prompts import build_base_system_prompt
+from backend.agents.tools import get_tools
+from backend.config import settings
+from backend.memory.memory_manager import detect_query_type
 
 logger = logging.getLogger(__name__)
 
-_unsloth_token: str | None = None
-_unsloth_active_model: str | None = None
-
-# Combine all cloud provider tools
-_all_tools = [
-    *aws_tools,  # AWS tools
-    azure_cost_by_service,
-    azure_cost_daily_trend,
-    azure_resource_inventory,
-    gcp_billing_by_service,
-    gcp_cost_daily_trend,
-    gcp_resource_inventory,
-    digitalocean_billing_summary,
-    digitalocean_resource_costs,
-    digitalocean_monthly_trend,
-]
-
-SYSTEM_PROMPT = """You are Shimo Agent — an expert multi-cloud cost analyst.
-
-Your job is to help users understand their cloud spending across AWS, Azure, GCP, and DigitalOcean
-by answering natural language questions about costs, resources, and optimization opportunities.
-
-CAPABILITIES:
-- Retrieve cost breakdowns by service, region, account, or tag (per cloud)
-- Compare costs across multiple cloud providers
-- Show cost trends over time
-- List active resources across all configured clouds
-- Provide cloud-specific and multi-cloud optimization recommendations
-
-RESPONSE FORMAT — you MUST return valid JSON with this structure:
-{
-  "summary": "Human-readable analysis summary in 2-4 sentences",
-  "total_cost": 123.45,
-  "currency": "USD",
-  "period": "2025-01-01 to 2025-03-31",
-  "providers": {
-    "aws": {"total": 100, "services": {}},
-    "azure": {"total": 50, "services": {}},
-    "gcp": {"total": 30, "services": {}},
-    "digitalocean": {"total": 20, "services": {}}
-  },
-  "service_breakdown": [
-    {"service": "Compute", "cost": 80.00, "percentage": 65.0, "change": 5.2}
-  ],
-  "time_series": [
-    {"date": "2025-01", "cost": 40.00, "service": "Total"}
-  ],
-  "recommendations": [
-    "Consider Reserved Instances for stable EC2 workloads to save ~30%"
-  ],
-  "chart_type": "bar"
-}
-
-RULES:
-- Always call the appropriate tool(s) first to get real data
-- Support AWS, Azure, GCP, and DigitalOcean queries
-- If a tool returns an error, report it clearly in the summary
-- Use "bar" for service comparisons, "line" for time trends, "pie" for proportional breakdowns, "area" for cumulative trends
-- Always include actionable recommendations
-- Round all monetary values to 2 decimal places
-- When showing percentage changes, compare to the previous period
-- Respond ONLY with the JSON object, no markdown formatting or extra text
-"""
+CHART_TYPES = {"bar", "line", "pie", "area"}
+QUERY_TYPES = {"costs", "trend", "forecast", "comparison", "inventory", "optimization", "analysis"}
+MAX_BREAKDOWN_ITEMS = 20
 
 
-def _build_agent() -> Agent:
-    """Build and return the Strands cost analysis agent."""
-    model_kwargs: dict[str, Any] = {}
-
-    if settings.llm_provider == "bedrock":
-        from strands.models import BedrockModel
-
-        model = BedrockModel(
-            model_id=settings.bedrock_model_id,
-            region_name=settings.bedrock_region,
-            streaming=True,
-        )
-        model_kwargs["model"] = model
-
-    elif settings.llm_provider == "openai":
-        from strands.models.openai import OpenAIModel
-
-        model = OpenAIModel(
-            model=settings.openai_model,
-            client_args={"api_key": settings.openai_api_key},
-        )
-        model_kwargs["model"] = model
-
-    elif settings.llm_provider == "gemini":
-        from strands.models.openai import OpenAIModel
-
-        if not settings.gemini_api_key:
-            raise ValueError("GEMINI_API_KEY is required when LLM_PROVIDER=gemini")
-
-        # Gemini exposes an OpenAI-compatible endpoint.
-        model = OpenAIModel(
-            model=settings.gemini_model,
-            client_args={
-                "api_key": settings.gemini_api_key,
-                "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
-            },
-        )
-        model_kwargs["model"] = model
-
-    elif settings.llm_provider == "anthropic":
-        from strands.models.anthropic import AnthropicModel
-
-        model = AnthropicModel(
-            model_id="claude-sonnet-4-20250514",
-            client_args={"api_key": settings.anthropic_api_key},
-        )
-        model_kwargs["model"] = model
-
-    elif settings.llm_provider == "ollama":
-        from strands.models.ollama import OllamaModel
-
-        model = OllamaModel(
-            host=settings.ollama_host,
-            model_id=settings.ollama_model,
-        )
-        model_kwargs["model"] = model
-
-    elif settings.llm_provider == "unsloth":
-        from strands.models.openai import OpenAIModel
-
-        try:
-            unsloth_token = _unsloth_login()
-            model_name = settings.unsloth_model or _unsloth_get_active_model(
-                unsloth_token
-            )
-            model = OpenAIModel(
-                model=model_name,
-                client_args={
-                    "api_key": unsloth_token,
-                    "base_url": f"{settings.unsloth_base_url.rstrip('/')}/v1",
-                },
-            )
-        except RuntimeError as exc:
-            if not settings.gemini_api_key:
-                raise RuntimeError(
-                    "Unsloth is unavailable and GEMINI_API_KEY is not configured for fallback"
-                ) from exc
-            logger.warning(
-                "Unsloth unavailable, falling back to Gemini model '%s'",
-                settings.gemini_model,
-            )
-            model = OpenAIModel(
-                model=settings.gemini_model,
-                client_args={
-                    "api_key": settings.gemini_api_key,
-                    "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
-                },
-            )
-        model_kwargs["model"] = model
-
-    agent = Agent(
-        system_prompt=SYSTEM_PROMPT,
-        tools=_all_tools,
-        **model_kwargs,
-    )
-    return agent
+# ----- JSON extraction ------------------------------------------------------------------
 
 
-def _unsloth_login() -> str:
-    """Authenticate with Unsloth Studio and return bearer token."""
-    global _unsloth_token  # noqa: PLW0603
-    if _unsloth_token:
-        return _unsloth_token
+def _balanced_json_objects(text: str) -> list[str]:
+    """Yield candidate top-level ``{...}`` substrings using brace matching (string-aware)."""
+    candidates: list[str] = []
+    depth = 0
+    start = -1
+    in_string = False
+    escape = False
+    for index, char in enumerate(text):
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif char == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start >= 0:
+                candidates.append(text[start : index + 1])
+                start = -1
+    return candidates
 
-    login_url = f"{settings.unsloth_base_url.rstrip('/')}/api/auth/login"
-    payload = json.dumps(
-        {
-            "username": settings.unsloth_username,
-            "password": settings.unsloth_password,
-        }
-    ).encode("utf-8")
 
-    request = Request(
-        login_url,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-
+def extract_json(text: str) -> dict[str, Any] | None:
+    """Extract the first JSON object from model output (plain, fenced, or embedded in prose)."""
+    if not text:
+        return None
+    stripped = text.strip()
     try:
-        with urlopen(request, timeout=10) as response:
-            body = response.read().decode("utf-8", errors="replace")
-            parsed = json.loads(body)
-            token = str(parsed.get("access_token", "")).strip()
-            if not token:
-                raise RuntimeError("Unsloth login response missing access_token")
-            _unsloth_token = token
-            return token
-    except (HTTPError, URLError, TimeoutError, ValueError) as exc:
-        raise RuntimeError("Unable to authenticate to Unsloth Studio") from exc
-
-
-def _unsloth_get_active_model(token: str) -> str:
-    """Get active model from Unsloth status endpoint."""
-    global _unsloth_active_model  # noqa: PLW0603
-    if _unsloth_active_model:
-        return _unsloth_active_model
-
-    status_url = f"{settings.unsloth_base_url.rstrip('/')}/v1/status"
-    request = Request(
-        status_url,
-        headers={"Authorization": f"Bearer {token}"},
-        method="GET",
-    )
-
-    try:
-        with urlopen(request, timeout=10) as response:
-            body = response.read().decode("utf-8", errors="replace")
-            parsed = json.loads(body)
-            model = str(parsed.get("active_model", "")).strip()
-            if model:
-                _unsloth_active_model = model
-                return model
-    except (HTTPError, URLError, TimeoutError, ValueError):
-        logger.warning(
-            "Unable to auto-detect Unsloth active model; using fallback model name"
-        )
-
-    return "default"
-
-
-# Module-level agent instance (lazy init)
-_agent: Agent | None = None
-
-
-def get_agent() -> Agent:
-    """Get or create the singleton agent instance."""
-    global _agent  # noqa: PLW0603
-    if _agent is None:
-        _agent = _build_agent()
-    return _agent
-
-
-def _extract_json(text: str) -> dict[str, Any] | None:
-    """Extract JSON object from agent response text."""
-    # Try direct parse
-    try:
-        return json.loads(text)
+        parsed = json.loads(stripped)
+        return parsed if isinstance(parsed, dict) else None
     except (json.JSONDecodeError, TypeError):
         pass
 
-    # Try to find JSON block in markdown
-    patterns = [
-        r"```json\s*([\s\S]*?)```",
-        r"```\s*([\s\S]*?)```",
-        r"\{[\s\S]*\}",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text)
-        if match:
-            candidate = match.group(1) if match.lastindex else match.group(0)
-            try:
-                return json.loads(candidate.strip())
-            except (json.JSONDecodeError, TypeError):
+    for match in re.finditer(r"```(?:json)?\s*([\s\S]*?)```", stripped):
+        try:
+            parsed = json.loads(match.group(1).strip())
+            if isinstance(parsed, dict):
+                return parsed
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+    best: dict[str, Any] | None = None
+    for candidate in _balanced_json_objects(stripped):
+        try:
+            parsed = json.loads(candidate)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(parsed, dict) and (best is None or len(candidate) > len(json.dumps(best))):
+            best = parsed
+    return best
+
+
+# Backwards-compatible alias
+_extract_json = extract_json
+
+
+# ----- normalisation ------------------------------------------------------------------------
+
+
+def _to_float(value: Any, default: float = 0.0) -> float:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        cleaned = re.sub(r"[^0-9.\-eE]", "", value.replace(",", ""))
+        try:
+            return float(cleaned) if cleaned not in ("", "-", ".", "-.") else default
+        except ValueError:
+            return default
+    return default
+
+
+def _normalise_breakdown(raw: Any) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    if isinstance(raw, dict):
+        raw = [{"service": name, "cost": cost} for name, cost in raw.items()]
+    if not isinstance(raw, list):
+        return items
+    for entry in raw:
+        if isinstance(entry, dict):
+            name = str(entry.get("service") or entry.get("name") or entry.get("label") or "").strip()
+            if not name:
                 continue
-    return None
-
-
-def analyze_costs(query: str) -> dict[str, Any]:
-    """Run a natural language cost analysis query through the agent.
-
-    Args:
-        query: Natural language question about AWS costs.
-
-    Returns:
-        Dictionary with analysis results.
-    """
-    agent = get_agent()
-
-    try:
-        result = agent(query)
-        raw_text = str(result)
-
-        parsed = _extract_json(raw_text)
-        if parsed:
-            analysis_data = {
-                "summary": parsed.get("summary", ""),
-                "total_cost": parsed.get("total_cost", 0),
-                "currency": parsed.get("currency", "USD"),
-                "period": parsed.get("period", ""),
-                "service_breakdown": parsed.get("service_breakdown", []),
-                "time_series": parsed.get("time_series", []),
-                "top_costs": parsed.get("top_costs", []),
-                "recommendations": parsed.get("recommendations", []),
-                "raw_response": raw_text,
-                "chart_type": parsed.get("chart_type", "bar"),
-            }
-            analysis_data["a2ui_messages"] = build_cost_analysis_a2ui_messages(
-                analysis_data
+            items.append(
+                {
+                    "service": name,
+                    "cost": round(_to_float(entry.get("cost", entry.get("value"))), 2),
+                    "percentage": round(_to_float(entry.get("percentage")), 2),
+                    "change": round(_to_float(entry.get("change")), 2),
+                }
             )
-            return {
-                "success": True,
-                "data": analysis_data,
-            }
+    items.sort(key=lambda item: item["cost"], reverse=True)
+    return items[:MAX_BREAKDOWN_ITEMS]
 
-        # Fallback: return raw text as summary
-        fallback_data = {
-            "summary": raw_text,
-            "total_cost": 0,
-            "currency": "USD",
-            "period": "",
-            "service_breakdown": [],
-            "time_series": [],
-            "top_costs": [],
-            "recommendations": [],
-            "raw_response": raw_text,
-            "chart_type": "bar",
-        }
-        fallback_data["a2ui_messages"] = build_cost_analysis_a2ui_messages(
-            fallback_data
+
+def _normalise_time_series(raw: Any) -> list[dict[str, Any]]:
+    points: list[dict[str, Any]] = []
+    if not isinstance(raw, list):
+        return points
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        date = str(entry.get("date") or entry.get("month") or entry.get("day") or "").strip()
+        if not date:
+            continue
+        points.append(
+            {
+                "date": date,
+                "cost": round(_to_float(entry.get("cost", entry.get("value"))), 2),
+                "service": str(entry.get("service") or "Total"),
+            }
         )
+    return points
+
+
+def _normalise_providers(raw: Any) -> dict[str, dict[str, Any]]:
+    providers: dict[str, dict[str, Any]] = {}
+    if not isinstance(raw, dict):
+        return providers
+    for name, data in raw.items():
+        entry: dict[str, Any] = {"total": 0.0, "services": {}}
+        if isinstance(data, dict):
+            entry["total"] = round(_to_float(data.get("total", data.get("total_cost"))), 2)
+            services = data.get("services")
+            if isinstance(services, dict):
+                entry["services"] = {str(k): round(_to_float(v), 2) for k, v in services.items()}
+            elif isinstance(services, list):
+                entry["services"] = {
+                    str(item.get("service", "")): round(_to_float(item.get("cost")), 2)
+                    for item in services
+                    if isinstance(item, dict) and item.get("service")
+                }
+            if not entry["total"] and entry["services"]:
+                entry["total"] = round(sum(entry["services"].values()), 2)
+        else:
+            entry["total"] = round(_to_float(data), 2)
+        providers[str(name).lower()] = entry
+    return providers
+
+
+def normalize_analysis(parsed: dict[str, Any] | None, raw_text: str, query: str = "") -> dict[str, Any]:
+    """Turn (possibly partial) model JSON into the ``AnalysisResult`` shape with A2UI messages."""
+    parsed = parsed if isinstance(parsed, dict) else {}
+    raw_text = raw_text or ""
+
+    summary = str(parsed.get("summary") or "").strip()
+    if not summary:
+        summary = raw_text.strip() or "Analysis completed."
+
+    providers = _normalise_providers(parsed.get("providers"))
+    breakdown = _normalise_breakdown(parsed.get("service_breakdown"))
+    time_series = _normalise_time_series(parsed.get("time_series"))
+
+    total_cost = round(_to_float(parsed.get("total_cost")), 2)
+    if total_cost <= 0 and breakdown:
+        total_cost = round(sum(item["cost"] for item in breakdown), 2)
+    if total_cost <= 0 and providers:
+        total_cost = round(sum(item["total"] for item in providers.values()), 2)
+    if total_cost <= 0 and time_series:
+        total_cost = round(sum(point["cost"] for point in time_series), 2)
+
+    if total_cost > 0 and breakdown and all(item["percentage"] == 0 for item in breakdown):
+        for item in breakdown:
+            item["percentage"] = round(item["cost"] / total_cost * 100, 2)
+
+    recommendations = parsed.get("recommendations")
+    if isinstance(recommendations, str):
+        recommendations = [recommendations]
+    recommendations = [str(rec).strip() for rec in (recommendations or []) if str(rec).strip()]
+
+    chart_type = str(parsed.get("chart_type") or "").lower()
+    if chart_type not in CHART_TYPES:
+        chart_type = "line" if time_series and not breakdown else "bar"
+
+    query_type = str(parsed.get("query_type") or "").lower()
+    if query_type not in QUERY_TYPES:
+        query_type = detect_query_type(query or summary)
+
+    top_costs = parsed.get("top_costs")
+    top_costs = [
+        {
+            "label": str(item.get("label") or item.get("service") or ""),
+            "value": round(_to_float(item.get("value", item.get("cost"))), 2),
+            "unit": str(item.get("unit") or parsed.get("currency") or "USD"),
+        }
+        for item in (top_costs if isinstance(top_costs, list) else [])
+        if isinstance(item, dict) and (item.get("label") or item.get("service"))
+    ]
+
+    analysis: dict[str, Any] = {
+        "summary": summary,
+        "total_cost": total_cost,
+        "currency": str(parsed.get("currency") or "USD"),
+        "period": str(parsed.get("period") or ""),
+        "providers": providers,
+        "service_breakdown": breakdown,
+        "time_series": time_series,
+        "top_costs": top_costs,
+        "recommendations": recommendations,
+        "raw_response": raw_text,
+        "chart_type": chart_type,
+        "query_type": query_type,
+    }
+    analysis["a2ui_messages"] = build_cost_analysis_a2ui_messages(analysis)
+    return analysis
+
+
+# ----- result helpers -------------------------------------------------------------------------
+
+
+def result_text(result: AgentResult | Any) -> str:
+    """Concatenated text blocks of an agent result."""
+    message = getattr(result, "message", None)
+    if isinstance(message, dict):
+        parts = [block.get("text", "") for block in message.get("content", []) if isinstance(block, dict)]
+        text = "".join(parts).strip()
+        if text:
+            return text
+    return str(result)
+
+
+def tool_calls_from_metrics(metrics: Any) -> list[dict[str, Any]]:
+    """Summarise tool usage recorded by Strands during a run."""
+    calls: list[dict[str, Any]] = []
+    for name, metric in (getattr(metrics, "tool_metrics", None) or {}).items():
+        calls.append(
+            {
+                "tool": name,
+                "calls": int(getattr(metric, "call_count", 0) or 0),
+                "successes": int(getattr(metric, "success_count", 0) or 0),
+                "errors": int(getattr(metric, "error_count", 0) or 0),
+                "seconds": round(float(getattr(metric, "total_time", 0.0) or 0.0), 3),
+            }
+        )
+    return calls
+
+
+def usage_from_metrics(metrics: Any) -> dict[str, int]:
+    """Token usage accumulated over a run."""
+    usage = dict(getattr(metrics, "accumulated_usage", None) or {})
+    return {
+        "input_tokens": int(usage.get("inputTokens", 0) or 0),
+        "output_tokens": int(usage.get("outputTokens", 0) or 0),
+        "total_tokens": int(usage.get("totalTokens", 0) or 0),
+        "cycles": int(getattr(metrics, "cycle_count", 0) or 0),
+    }
+
+
+def estimate_tokens(text: str) -> int:
+    """Rough token estimate when the provider reports no usage."""
+    return max(1, int(len(text.split()) * 1.3))
+
+
+# ----- agent construction ------------------------------------------------------------------------
+
+
+def build_agent(
+    *,
+    system_prompt: str,
+    providers: list[str] | None = None,
+    model: Model | None = None,
+    llm_provider: str | None = None,
+    messages: list[dict[str, Any]] | None = None,
+    callback_handler: Callable[..., Any] | None = None,
+    window_size: int = 40,
+    tools: list | None = None,
+) -> Agent:
+    """Create a Strands agent with the tools for ``providers``.
+
+    ``callback_handler`` defaults to silent; pass a callable to stream tokens / tool events.
+    """
+    return Agent(
+        model=model or build_model(llm_provider),
+        tools=tools if tools is not None else get_tools(providers),
+        system_prompt=system_prompt,
+        messages=list(messages or []),
+        callback_handler=callback_handler,
+        conversation_manager=SlidingWindowConversationManager(window_size=max(4, window_size)),
+    )
+
+
+def analyze_costs(
+    query: str,
+    providers: list[str] | None = None,
+    connection_context: dict[str, dict[str, Any]] | None = None,
+    llm_provider: str | None = None,
+) -> dict[str, Any]:
+    """One-shot analysis without session memory (fresh agent per call).
+
+    Returns ``{"success": True, "data": analysis}`` or ``{"success": False, "error": ...}``.
+    """
+    providers = [p.lower() for p in (providers or [])] or None
+    active = providers or [
+        name for name, status in settings.provider_status().items() if status.get("configured")
+    ] or ["aws"]
+    system_prompt = build_base_system_prompt(active, connection_context)
+    try:
+        agent = build_agent(system_prompt=system_prompt, providers=active, llm_provider=llm_provider)
+        result = agent(query)
+        raw = result_text(result)
+        analysis = normalize_analysis(extract_json(raw), raw, query)
         return {
             "success": True,
-            "data": fallback_data,
+            "data": analysis,
+            "tool_calls": tool_calls_from_metrics(result.metrics),
+            "usage": usage_from_metrics(result.metrics),
         }
-
-    except Exception as exc:
+    except Exception as exc:  # pylint: disable=broad-exception-caught
         logger.exception("Agent analysis failed")
-        return {"success": False, "error": str(exc)}
+        return {"success": False, "error": f"{type(exc).__name__}: {exc}"}

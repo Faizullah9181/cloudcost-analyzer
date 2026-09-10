@@ -1,460 +1,383 @@
-"""Custom Strands tools for AWS cost analysis."""
+"""Strands tools for AWS cost analysis (Cost Explorer, Organizations, resource inventory)."""
 
 from __future__ import annotations
 
-import json
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
+from typing import Any
 
 import boto3
-from botocore.exceptions import ClientError, NoCredentialsError
+from botocore.exceptions import BotoCoreError, ClientError
 from strands import tool
 
-try:
-    from backend.config import settings
-except ImportError:
-    from config import settings
+from backend.agents.tools._common import (
+    clamp,
+    day_range,
+    error_result,
+    month_range,
+    round_money,
+    today_utc,
+)
+from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Cost Explorer and Organizations are global services served from us-east-1.
+GLOBAL_REGION = "us-east-1"
 
-def _get_ce_client():
-    """Get AWS Cost Explorer client."""
-    kwargs = {"region_name": settings.aws_region}
-    if settings.aws_access_key_id:
+
+def _session() -> boto3.session.Session:
+    """Build a boto3 session from explicit settings, falling back to ambient credentials."""
+    kwargs: dict[str, Any] = {"region_name": settings.aws_region}
+    if settings.aws_profile:
+        kwargs["profile_name"] = settings.aws_profile
+    if settings.aws_access_key_id and settings.aws_secret_access_key:
         kwargs["aws_access_key_id"] = settings.aws_access_key_id
         kwargs["aws_secret_access_key"] = settings.aws_secret_access_key
         if settings.aws_session_token:
             kwargs["aws_session_token"] = settings.aws_session_token
-    return boto3.client("ce", **kwargs)
+    return boto3.session.Session(**kwargs)
 
 
-def _get_org_client():
-    """Get AWS Organizations client."""
-    kwargs = {"region_name": settings.aws_region}
-    if settings.aws_access_key_id:
-        kwargs["aws_access_key_id"] = settings.aws_access_key_id
-        kwargs["aws_secret_access_key"] = settings.aws_secret_access_key
-        if settings.aws_session_token:
-            kwargs["aws_session_token"] = settings.aws_session_token
-    return boto3.client("organizations", **kwargs)
+def _client(service: str, region: str | None = None):
+    return _session().client(service, region_name=region or settings.aws_region)
+
+
+def _ce():
+    return _client("ce", GLOBAL_REGION)
+
+
+def _aws_error(exc: Exception, **extra: Any) -> dict[str, Any]:
+    logger.warning("AWS call failed: %s", exc)
+    return error_result("aws", str(exc), **extra)
+
+
+def _grouped_costs(response: dict, key_name: str) -> list[dict[str, Any]]:
+    """Flatten a grouped Cost Explorer response into ``[{key, cost, date}]`` rows."""
+    rows: list[dict[str, Any]] = []
+    for period in response.get("ResultsByTime", []):
+        period_start = period["TimePeriod"]["Start"]
+        for group in period.get("Groups", []):
+            cost = float(group["Metrics"]["UnblendedCost"]["Amount"])
+            if cost > 0.01:
+                rows.append({key_name: group["Keys"][0] or "n/a", "cost": round(cost, 2), "date": period_start})
+    return sorted(rows, key=lambda row: row["cost"], reverse=True)
 
 
 @tool
-def get_monthly_cost_breakdown(months: int = 3) -> str:
-    """Get monthly AWS cost breakdown by service for the last N months.
+def aws_monthly_cost_breakdown(months: int = 3) -> dict:
+    """Get monthly AWS cost broken down by service for the current month and prior months.
 
     Args:
-        months: Number of months to look back (1-12). Defaults to 3.
+        months: Number of months to include (1-12), counting the current month. Defaults to 3.
 
     Returns:
-        JSON string with monthly cost data grouped by service.
+        Period, per-service cost rows (with the month each row belongs to), and the total.
     """
-    months = max(1, min(months, 12))
-    end_date = datetime.utcnow().strftime("%Y-%m-%d")
-    start_date = (datetime.utcnow() - timedelta(days=30 * months)).strftime("%Y-%m-%d")
-
+    start, end = month_range(months)
     try:
-        client = _get_ce_client()
-        response = client.get_cost_and_usage(
-            TimePeriod={"Start": start_date, "End": end_date},
+        response = _ce().get_cost_and_usage(
+            TimePeriod={"Start": start, "End": end},
             Granularity="MONTHLY",
-            Metrics=["UnblendedCost", "UsageQuantity"],
+            Metrics=["UnblendedCost"],
             GroupBy=[{"Type": "DIMENSION", "Key": "SERVICE"}],
         )
+    except (ClientError, BotoCoreError) as exc:
+        return _aws_error(exc)
 
-        results = []
-        for period in response.get("ResultsByTime", []):
-            period_start = period["TimePeriod"]["Start"]
-            for group in period.get("Groups", []):
-                service = group["Keys"][0]
-                cost = float(group["Metrics"]["UnblendedCost"]["Amount"])
-                if cost > 0.01:
-                    results.append(
-                        {
-                            "date": period_start,
-                            "service": service,
-                            "cost": round(cost, 2),
-                        }
-                    )
-
-        return json.dumps(
-            {
-                "period": f"{start_date} to {end_date}",
-                "data": sorted(results, key=lambda x: x["cost"], reverse=True),
-                "total": round(sum(r["cost"] for r in results), 2),
-            }
-        )
-    except (ClientError, NoCredentialsError) as e:
-        return json.dumps({"error": str(e)})
+    rows = _grouped_costs(response, "service")
+    by_service: dict[str, float] = {}
+    for row in rows:
+        by_service[row["service"]] = round(by_service.get(row["service"], 0.0) + row["cost"], 2)
+    return {
+        "provider": "aws",
+        "period": f"{start} to {end}",
+        "currency": "USD",
+        "total": round(sum(by_service.values()), 2),
+        "services": dict(sorted(by_service.items(), key=lambda item: item[1], reverse=True)),
+        "monthly_rows": rows,
+    }
 
 
 @tool
-def get_daily_cost_trend(days: int = 30) -> str:
-    """Get daily AWS cost trend for the last N days.
+def aws_daily_cost_trend(days: int = 30) -> dict:
+    """Get the daily AWS cost trend for the last N days.
 
     Args:
         days: Number of days to look back (1-90). Defaults to 30.
 
     Returns:
-        JSON string with daily total cost data.
+        Daily total cost points, the total for the period and the daily average.
     """
-    days = max(1, min(days, 90))
-    end_date = datetime.utcnow().strftime("%Y-%m-%d")
-    start_date = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
-
+    start, end = day_range(days, max_days=90)
     try:
-        client = _get_ce_client()
-        response = client.get_cost_and_usage(
-            TimePeriod={"Start": start_date, "End": end_date},
+        response = _ce().get_cost_and_usage(
+            TimePeriod={"Start": start, "End": end},
             Granularity="DAILY",
             Metrics=["UnblendedCost"],
         )
+    except (ClientError, BotoCoreError) as exc:
+        return _aws_error(exc)
 
-        results = []
-        for period in response.get("ResultsByTime", []):
-            cost = float(period["Total"]["UnblendedCost"]["Amount"])
-            results.append(
-                {"date": period["TimePeriod"]["Start"], "cost": round(cost, 2)}
-            )
-
-        return json.dumps(
-            {
-                "period": f"{start_date} to {end_date}",
-                "data": results,
-                "total": round(sum(r["cost"] for r in results), 2),
-                "average_daily": round(
-                    sum(r["cost"] for r in results) / max(len(results), 1), 2
-                ),
-            }
-        )
-    except (ClientError, NoCredentialsError) as e:
-        return json.dumps({"error": str(e)})
+    points = [
+        {"date": period["TimePeriod"]["Start"], "cost": round(float(period["Total"]["UnblendedCost"]["Amount"]), 2)}
+        for period in response.get("ResultsByTime", [])
+    ]
+    total = round(sum(point["cost"] for point in points), 2)
+    return {
+        "provider": "aws",
+        "period": f"{start} to {end}",
+        "currency": "USD",
+        "daily_costs": points,
+        "total": total,
+        "average_daily": round(total / max(len(points), 1), 2),
+    }
 
 
 @tool
-def get_service_cost_details(service_name: str, months: int = 1) -> str:
-    """Get detailed cost breakdown for a specific AWS service.
+def aws_service_cost_details(service_name: str, months: int = 1) -> dict:
+    """Get a usage-type level cost breakdown for one AWS service.
 
     Args:
-        service_name: AWS service name (e.g., 'Amazon EC2', 'Amazon S3', 'AWS Lambda').
-        months: Number of months to look back. Defaults to 1.
+        service_name: Exact Cost Explorer service name, e.g. 'Amazon Elastic Compute Cloud - Compute',
+            'Amazon Simple Storage Service', 'AWS Lambda', 'Amazon Relational Database Service'.
+        months: Number of months to include (1-12). Defaults to 1.
 
     Returns:
-        JSON string with detailed cost breakdown for the service.
+        Cost per usage type for the service and the service total.
     """
-    months = max(1, min(months, 12))
-    end_date = datetime.utcnow().strftime("%Y-%m-%d")
-    start_date = (datetime.utcnow() - timedelta(days=30 * months)).strftime("%Y-%m-%d")
-
+    start, end = month_range(months)
     try:
-        client = _get_ce_client()
-        response = client.get_cost_and_usage(
-            TimePeriod={"Start": start_date, "End": end_date},
+        response = _ce().get_cost_and_usage(
+            TimePeriod={"Start": start, "End": end},
             Granularity="MONTHLY",
-            Metrics=["UnblendedCost", "UsageQuantity"],
+            Metrics=["UnblendedCost"],
             Filter={"Dimensions": {"Key": "SERVICE", "Values": [service_name]}},
             GroupBy=[{"Type": "DIMENSION", "Key": "USAGE_TYPE"}],
         )
+    except (ClientError, BotoCoreError) as exc:
+        return _aws_error(exc, service=service_name)
 
-        results = []
-        for period in response.get("ResultsByTime", []):
-            for group in period.get("Groups", []):
-                usage_type = group["Keys"][0]
-                cost = float(group["Metrics"]["UnblendedCost"]["Amount"])
-                if cost > 0.001:
-                    results.append(
-                        {
-                            "usage_type": usage_type,
-                            "cost": round(cost, 4),
-                            "date": period["TimePeriod"]["Start"],
-                        }
-                    )
-
-        return json.dumps(
-            {
-                "service": service_name,
-                "period": f"{start_date} to {end_date}",
-                "data": sorted(results, key=lambda x: x["cost"], reverse=True),
-                "total": round(sum(r["cost"] for r in results), 2),
-            }
-        )
-    except (ClientError, NoCredentialsError) as e:
-        return json.dumps({"error": str(e)})
+    rows = _grouped_costs(response, "usage_type")
+    return {
+        "provider": "aws",
+        "service": service_name,
+        "period": f"{start} to {end}",
+        "currency": "USD",
+        "usage_types": rows,
+        "total": round(sum(row["cost"] for row in rows), 2),
+    }
 
 
 @tool
-def get_cost_by_region(months: int = 1) -> str:
-    """Get AWS cost breakdown by region.
+def aws_cost_by_region(months: int = 1) -> dict:
+    """Get AWS cost broken down by region.
 
     Args:
-        months: Number of months to look back. Defaults to 1.
+        months: Number of months to include (1-12). Defaults to 1.
 
     Returns:
-        JSON string with cost data grouped by AWS region.
+        Cost per region and the total.
     """
-    months = max(1, min(months, 12))
-    end_date = datetime.utcnow().strftime("%Y-%m-%d")
-    start_date = (datetime.utcnow() - timedelta(days=30 * months)).strftime("%Y-%m-%d")
-
+    start, end = month_range(months)
     try:
-        client = _get_ce_client()
-        response = client.get_cost_and_usage(
-            TimePeriod={"Start": start_date, "End": end_date},
+        response = _ce().get_cost_and_usage(
+            TimePeriod={"Start": start, "End": end},
             Granularity="MONTHLY",
             Metrics=["UnblendedCost"],
             GroupBy=[{"Type": "DIMENSION", "Key": "REGION"}],
         )
+    except (ClientError, BotoCoreError) as exc:
+        return _aws_error(exc)
 
-        results = []
-        for period in response.get("ResultsByTime", []):
-            for group in period.get("Groups", []):
-                region = group["Keys"][0] or "global"
-                cost = float(group["Metrics"]["UnblendedCost"]["Amount"])
-                if cost > 0.01:
-                    results.append({"region": region, "cost": round(cost, 2)})
-
-        return json.dumps(
-            {
-                "period": f"{start_date} to {end_date}",
-                "data": sorted(results, key=lambda x: x["cost"], reverse=True),
-                "total": round(sum(r["cost"] for r in results), 2),
-            }
-        )
-    except (ClientError, NoCredentialsError) as e:
-        return json.dumps({"error": str(e)})
+    rows = _grouped_costs(response, "region")
+    for row in rows:
+        if row["region"] in ("", "n/a", "NoRegion"):
+            row["region"] = "global"
+    return {
+        "provider": "aws",
+        "period": f"{start} to {end}",
+        "currency": "USD",
+        "regions": rows,
+        "total": round(sum(row["cost"] for row in rows), 2),
+    }
 
 
 @tool
-def get_cost_by_account(months: int = 1) -> str:
-    """Get AWS cost breakdown by linked account (for AWS Organizations).
+def aws_cost_by_account(months: int = 1) -> dict:
+    """Get AWS cost broken down by linked account (AWS Organizations).
 
     Args:
-        months: Number of months to look back. Defaults to 1.
+        months: Number of months to include (1-12). Defaults to 1.
 
     Returns:
-        JSON string with cost data grouped by AWS account ID.
+        Cost per account with account names when Organizations access is available.
     """
-    months = max(1, min(months, 12))
-    end_date = datetime.utcnow().strftime("%Y-%m-%d")
-    start_date = (datetime.utcnow() - timedelta(days=30 * months)).strftime("%Y-%m-%d")
-
+    start, end = month_range(months)
     try:
-        client = _get_ce_client()
-        response = client.get_cost_and_usage(
-            TimePeriod={"Start": start_date, "End": end_date},
+        response = _ce().get_cost_and_usage(
+            TimePeriod={"Start": start, "End": end},
             Granularity="MONTHLY",
             Metrics=["UnblendedCost"],
             GroupBy=[{"Type": "DIMENSION", "Key": "LINKED_ACCOUNT"}],
         )
+    except (ClientError, BotoCoreError) as exc:
+        return _aws_error(exc)
 
-        # Try to get account names
-        account_names = {}
-        try:
-            org_client = _get_org_client()
-            accounts = org_client.list_accounts()
-            for acct in accounts.get("Accounts", []):
-                account_names[acct["Id"]] = acct["Name"]
-        except (ClientError, NoCredentialsError):
-            pass
+    account_names: dict[str, str] = {}
+    try:
+        paginator = _client("organizations", GLOBAL_REGION).get_paginator("list_accounts")
+        for page in paginator.paginate():
+            for account in page.get("Accounts", []):
+                account_names[account["Id"]] = account["Name"]
+    except (ClientError, BotoCoreError) as exc:
+        logger.debug("Organizations lookup skipped: %s", exc)
 
-        results = []
-        for period in response.get("ResultsByTime", []):
-            for group in period.get("Groups", []):
-                account_id = group["Keys"][0]
-                cost = float(group["Metrics"]["UnblendedCost"]["Amount"])
-                if cost > 0.01:
-                    results.append(
-                        {
-                            "account_id": account_id,
-                            "account_name": account_names.get(account_id, account_id),
-                            "cost": round(cost, 2),
-                        }
-                    )
-
-        return json.dumps(
-            {
-                "period": f"{start_date} to {end_date}",
-                "data": sorted(results, key=lambda x: x["cost"], reverse=True),
-                "total": round(sum(r["cost"] for r in results), 2),
-            }
-        )
-    except (ClientError, NoCredentialsError) as e:
-        return json.dumps({"error": str(e)})
+    rows = _grouped_costs(response, "account_id")
+    for row in rows:
+        row["account_name"] = account_names.get(row["account_id"], row["account_id"])
+    return {
+        "provider": "aws",
+        "period": f"{start} to {end}",
+        "currency": "USD",
+        "accounts": rows,
+        "total": round(sum(row["cost"] for row in rows), 2),
+    }
 
 
 @tool
-def get_cost_forecast(forecast_days: int = 30) -> str:
-    """Get AWS cost forecast for the next N days.
+def aws_cost_forecast(forecast_days: int = 30) -> dict:
+    """Get the AWS cost forecast for the next N days.
 
     Args:
-        forecast_days: Number of days to forecast (1-90). Defaults to 30.
+        forecast_days: Days to forecast (1-90). Defaults to 30.
 
     Returns:
-        JSON string with forecast data.
+        Daily mean forecast values and the forecast total.
     """
-    forecast_days = max(1, min(forecast_days, 90))
-    start_date = datetime.utcnow().strftime("%Y-%m-%d")
-    end_date = (datetime.utcnow() + timedelta(days=forecast_days)).strftime("%Y-%m-%d")
-
+    forecast_days = clamp(forecast_days, 1, 90)
+    start = today_utc()
+    end = start + timedelta(days=forecast_days)
     try:
-        client = _get_ce_client()
-        response = client.get_cost_forecast(
-            TimePeriod={"Start": start_date, "End": end_date},
+        response = _ce().get_cost_forecast(
+            TimePeriod={"Start": start.isoformat(), "End": end.isoformat()},
             Granularity="DAILY",
             Metric="UNBLENDED_COST",
         )
+    except (ClientError, BotoCoreError) as exc:
+        return _aws_error(exc)
 
-        forecasts = []
-        for item in response.get("ForecastResultsByTime", []):
-            forecasts.append(
-                {
-                    "date": item["TimePeriod"]["Start"],
-                    "mean": round(float(item["MeanValue"]), 2),
-                }
-            )
-
-        total_forecast = float(response.get("Total", {}).get("Amount", 0))
-        return json.dumps(
-            {
-                "period": f"{start_date} to {end_date}",
-                "data": forecasts,
-                "total_forecast": round(total_forecast, 2),
-            }
-        )
-    except (ClientError, NoCredentialsError) as e:
-        return json.dumps({"error": str(e)})
+    points = [
+        {"date": item["TimePeriod"]["Start"], "mean": round(float(item["MeanValue"]), 2)}
+        for item in response.get("ForecastResultsByTime", [])
+    ]
+    return {
+        "provider": "aws",
+        "period": f"{start.isoformat()} to {end.isoformat()}",
+        "currency": "USD",
+        "forecast": points,
+        "total_forecast": round_money(response.get("Total", {}).get("Amount", 0)),
+    }
 
 
 @tool
-def get_resource_inventory() -> str:
-    """Get a summary of active AWS resources across key services (EC2, RDS, S3, Lambda).
+def aws_resource_inventory() -> dict:
+    """Summarise active AWS resources in the configured region (EC2, RDS, S3, Lambda).
 
     Returns:
-        JSON string with resource counts and details.
+        Counts and a sample of resources per service. Individual services report an
+        error field when access is denied instead of failing the whole inventory.
     """
-    inventory = {}
-    kwargs = {"region_name": settings.aws_region}
-    if settings.aws_access_key_id:
-        kwargs["aws_access_key_id"] = settings.aws_access_key_id
-        kwargs["aws_secret_access_key"] = settings.aws_secret_access_key
-        if settings.aws_session_token:
-            kwargs["aws_session_token"] = settings.aws_session_token
+    inventory: dict[str, Any] = {"provider": "aws", "region": settings.aws_region}
+    session = _session()
 
-    # EC2 instances
     try:
-        ec2 = boto3.client("ec2", **kwargs)
-        instances = ec2.describe_instances()
-        ec2_list = []
-        for reservation in instances["Reservations"]:
-            for inst in reservation["Instances"]:
-                ec2_list.append(
-                    {
-                        "id": inst["InstanceId"],
-                        "type": inst["InstanceType"],
-                        "state": inst["State"]["Name"],
-                    }
-                )
-        inventory["ec2"] = {"count": len(ec2_list), "instances": ec2_list[:20]}
-    except (ClientError, NoCredentialsError) as e:
-        inventory["ec2"] = {"error": str(e)}
-
-    # S3 buckets
-    try:
-        s3 = boto3.client("s3", **kwargs)
-        buckets = s3.list_buckets()
-        inventory["s3"] = {
-            "count": len(buckets.get("Buckets", [])),
-            "buckets": [b["Name"] for b in buckets.get("Buckets", [])][:20],
-        }
-    except (ClientError, NoCredentialsError) as e:
-        inventory["s3"] = {"error": str(e)}
-
-    # RDS instances
-    try:
-        rds = boto3.client("rds", **kwargs)
-        db_instances = rds.describe_db_instances()
-        rds_list = []
-        for db in db_instances["DBInstances"]:
-            rds_list.append(
-                {
-                    "id": db["DBInstanceIdentifier"],
-                    "engine": db["Engine"],
-                    "class": db["DBInstanceClass"],
-                    "status": db["DBInstanceStatus"],
-                }
-            )
-        inventory["rds"] = {"count": len(rds_list), "instances": rds_list[:20]}
-    except (ClientError, NoCredentialsError) as e:
-        inventory["rds"] = {"error": str(e)}
-
-    # Lambda functions
-    try:
-        lam = boto3.client("lambda", **kwargs)
-        functions = lam.list_functions()
-        lam_list = [
-            {"name": f["FunctionName"], "runtime": f.get("Runtime", "N/A")}
-            for f in functions.get("Functions", [])
+        ec2 = session.client("ec2")
+        instances = [
+            {"id": inst["InstanceId"], "type": inst["InstanceType"], "state": inst["State"]["Name"]}
+            for reservation in ec2.describe_instances().get("Reservations", [])
+            for inst in reservation.get("Instances", [])
         ]
-        inventory["lambda"] = {"count": len(lam_list), "functions": lam_list[:20]}
-    except (ClientError, NoCredentialsError) as e:
-        inventory["lambda"] = {"error": str(e)}
+        inventory["ec2"] = {"count": len(instances), "instances": instances[:20]}
+    except (ClientError, BotoCoreError) as exc:
+        inventory["ec2"] = {"error": str(exc)}
 
-    return json.dumps(inventory)
+    try:
+        buckets = session.client("s3").list_buckets().get("Buckets", [])
+        inventory["s3"] = {"count": len(buckets), "buckets": [bucket["Name"] for bucket in buckets][:20]}
+    except (ClientError, BotoCoreError) as exc:
+        inventory["s3"] = {"error": str(exc)}
+
+    try:
+        databases = [
+            {
+                "id": db["DBInstanceIdentifier"],
+                "engine": db["Engine"],
+                "class": db["DBInstanceClass"],
+                "status": db["DBInstanceStatus"],
+            }
+            for db in session.client("rds").describe_db_instances().get("DBInstances", [])
+        ]
+        inventory["rds"] = {"count": len(databases), "instances": databases[:20]}
+    except (ClientError, BotoCoreError) as exc:
+        inventory["rds"] = {"error": str(exc)}
+
+    try:
+        functions = [
+            {"name": fn["FunctionName"], "runtime": fn.get("Runtime", "n/a")}
+            for fn in session.client("lambda").list_functions().get("Functions", [])
+        ]
+        inventory["lambda"] = {"count": len(functions), "functions": functions[:20]}
+    except (ClientError, BotoCoreError) as exc:
+        inventory["lambda"] = {"error": str(exc)}
+
+    return inventory
 
 
 @tool
-def get_cost_by_tag(tag_key: str, months: int = 1) -> str:
-    """Get AWS cost breakdown by a specific cost allocation tag.
+def aws_cost_by_tag(tag_key: str, months: int = 1) -> dict:
+    """Get AWS cost broken down by the values of a cost-allocation tag.
 
     Args:
-        tag_key: The tag key to group costs by (e.g., 'Environment', 'Project', 'Team').
-        months: Number of months to look back. Defaults to 1.
+        tag_key: Tag key to group by, e.g. 'Environment', 'Project', 'Team'.
+        months: Number of months to include (1-12). Defaults to 1.
 
     Returns:
-        JSON string with cost data grouped by tag values.
+        Cost per tag value (untagged spend is reported as 'untagged') and the total.
     """
-    months = max(1, min(months, 12))
-    end_date = datetime.utcnow().strftime("%Y-%m-%d")
-    start_date = (datetime.utcnow() - timedelta(days=30 * months)).strftime("%Y-%m-%d")
-
+    start, end = month_range(months)
     try:
-        client = _get_ce_client()
-        response = client.get_cost_and_usage(
-            TimePeriod={"Start": start_date, "End": end_date},
+        response = _ce().get_cost_and_usage(
+            TimePeriod={"Start": start, "End": end},
             Granularity="MONTHLY",
             Metrics=["UnblendedCost"],
             GroupBy=[{"Type": "TAG", "Key": tag_key}],
         )
+    except (ClientError, BotoCoreError) as exc:
+        return _aws_error(exc, tag_key=tag_key)
 
-        results = []
-        for period in response.get("ResultsByTime", []):
-            for group in period.get("Groups", []):
-                tag_value = group["Keys"][0] or "untagged"
-                cost = float(group["Metrics"]["UnblendedCost"]["Amount"])
-                if cost > 0.01:
-                    results.append({"tag_value": tag_value, "cost": round(cost, 2)})
-
-        return json.dumps(
-            {
-                "tag_key": tag_key,
-                "period": f"{start_date} to {end_date}",
-                "data": sorted(results, key=lambda x: x["cost"], reverse=True),
-                "total": round(sum(r["cost"] for r in results), 2),
-            }
-        )
-    except (ClientError, NoCredentialsError) as e:
-        return json.dumps({"error": str(e)})
+    rows = _grouped_costs(response, "tag_value")
+    for row in rows:
+        # Cost Explorer returns "Key$Value"; "Key$" means untagged.
+        value = row["tag_value"].split("$", 1)[-1] if "$" in row["tag_value"] else row["tag_value"]
+        row["tag_value"] = value or "untagged"
+    return {
+        "provider": "aws",
+        "tag_key": tag_key,
+        "period": f"{start} to {end}",
+        "currency": "USD",
+        "tag_values": rows,
+        "total": round(sum(row["cost"] for row in rows), 2),
+    }
 
 
-# Collect all tools for the agent
-cost_tools = [
-    get_monthly_cost_breakdown,
-    get_daily_cost_trend,
-    get_service_cost_details,
-    get_cost_by_region,
-    get_cost_by_account,
-    get_cost_forecast,
-    get_resource_inventory,
-    get_cost_by_tag,
+aws_tools = [
+    aws_monthly_cost_breakdown,
+    aws_daily_cost_trend,
+    aws_service_cost_details,
+    aws_cost_by_region,
+    aws_cost_by_account,
+    aws_cost_forecast,
+    aws_resource_inventory,
+    aws_cost_by_tag,
 ]

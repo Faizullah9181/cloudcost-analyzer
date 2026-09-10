@@ -1,355 +1,341 @@
 """
 Memory Manager - Orchestration Layer
-============================================
-The Memory Manager coordinates all 4 memory layers:
-- HOT MEMORY (prompt layer)
-- COLD MEMORY (session history)
-- PROCEDURAL MEMORY (skills)
-- DEEP MEMORY (user modeling)
+====================================
+Coordinates the four memory layers for a session:
 
-It handles:
-1. Memory assembly for prompt injection
-2. Retrieval orchestration
-3. Long-session optimization
-4. Memory lifecycle management
+- HOT: base system prompt + session metadata + recent turns (always injected)
+- COLD: searchable history, compressed into summaries as it grows
+- PROCEDURAL: skills loaded on demand for the current query
+- DEEP: optional cross-session user model
+
+The manager only assembles context and tracks state; the ``AgentHarness``
+owns persistence and the LLM call.
 """
 
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
-from datetime import datetime
-import json
+from __future__ import annotations
 
-from .hot_memory import HotMemory, CloudProvider
-from .cold_memory import ColdMemory, MessageRole, StoredMessage
-from .procedural_memory import ProceduralMemory
+import re
+from collections.abc import Iterable
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
+
+from .cold_memory import ColdMemory, MessageRole, StoredMessage, Summarizer
 from .deep_memory import DeepMemory
+from .hot_memory import CloudProvider, HotMemory
+from .procedural_memory import ProceduralMemory
+
+_QUERY_TYPES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("forecast", ("forecast", "predict", "projection", "next month", "estimate")),
+    ("comparison", ("compare", "comparison", "versus", " vs ")),
+    ("inventory", ("inventory", "resources", "instances", "buckets", "list all", "how many")),
+    ("optimization", ("optimi", "save", "saving", "reduce", "idle", "waste", "cheaper", "recommend")),
+    ("trend", ("trend", "daily", "over time", "history", "growth", "last 30 days")),
+    ("costs", ("cost", "spend", "bill", "charge", "expensive", "total")),
+)
+
+
+def detect_query_type(text: str) -> str:
+    """Classify a query into a coarse analysis type."""
+    lowered = f" {text.lower()} "
+    for query_type, keywords in _QUERY_TYPES:
+        if any(keyword in lowered for keyword in keywords):
+            return query_type
+    return "analysis"
+
+
+def query_tags(text: str) -> list[str]:
+    """Tags for a message derived from its content."""
+    tags = {detect_query_type(text)}
+    lowered = text.lower()
+    for provider in CloudProvider:
+        if provider.value in lowered:
+            tags.add(provider.value)
+    if re.search(r"\b(ec2|s3|rds|lambda)\b", lowered):
+        tags.add("aws")
+    return sorted(tags)
 
 
 @dataclass
 class MemoryMetrics:
-    """Memory usage and performance metrics"""
-
-    hot_memory_tokens: int = 0
-    cold_memory_tokens: int = 0
-    procedural_memory_tokens: int = 0
-    deep_memory_tokens: int = 0
-    total_tokens: int = 0
-
-    compression_count: int = 0
-    last_compression_time: Optional[datetime] = None
+    """Memory usage and performance metrics."""
 
     total_messages: int = 0
     total_retrievals: int = 0
+    compression_count: int = 0
+    last_compression_time: datetime | None = None
+    last_prompt_words: int = 0
 
 
 class MemoryManager:
-    """
-    MEMORY MANAGER - Orchestrates all 4 memory layers.
-
-    Responsibilities:
-    1. Coordinate memory layers for query processing
-    2. Assemble complete prompt injection
-    3. Manage long-running sessions
-    4. Handle memory cleanup and compression
-    5. Provide metrics and monitoring
-    """
+    """Orchestrates the four memory layers for one session."""
 
     def __init__(
         self,
         session_id: str,
-        user_id: Optional[str] = None,
+        user_id: str | None = None,
         enable_deep_memory: bool = False,
+        *,
+        system_prompt: str | None = None,
+        compression_threshold: int = 20,
+        recent_window: int = 10,
+        context_word_limit: int = 6000,
+        deep_memory_state: dict[str, Any] | None = None,
     ):
-        """
-        Initialize memory manager.
-
-        Args:
-            session_id: Session identifier
-            user_id: User identifier (optional)
-            enable_deep_memory: Enable user modeling layer
-        """
         self.session_id = session_id
         self.user_id = user_id
+        self.enable_deep_memory = bool(enable_deep_memory and user_id)
 
-        # Initialize all 4 layers
-        self.hot_memory = HotMemory(session_id, session_name=session_id)
+        self.hot_memory = HotMemory(session_id, session_name=session_id, system_prompt=system_prompt or "")
         self.cold_memory = ColdMemory(session_id)
         self.procedural_memory = ProceduralMemory()
-        self.deep_memory = DeepMemory(user_id) if enable_deep_memory else None
+        self.deep_memory: DeepMemory | None = (
+            DeepMemory.from_dict(user_id, deep_memory_state) if self.enable_deep_memory and user_id else None
+        )
 
-        # Metrics
         self.metrics = MemoryMetrics()
+        self.compression_threshold = max(4, int(compression_threshold))
+        self.recent_window = max(2, int(recent_window))
+        self.context_word_limit = max(500, int(context_word_limit))
+        self._summarizer: Summarizer | None = None
 
-        # Configuration
-        self.compression_threshold = 20  # Compress after N messages
-        self.context_window_limit = 8000  # Max tokens in assembled prompt
-        self.enable_deep_memory = enable_deep_memory
-
-    # ========== SESSION SETUP ==========
+    # ----- setup ------------------------------------------------------------------
 
     def initialize_session(
-        self, session_name: str, providers: List[CloudProvider], llm_provider: str
+        self,
+        session_name: str,
+        providers: Iterable[CloudProvider | str],
+        llm_provider: str,
+        connection_context: dict[str, dict[str, Any]] | None = None,
     ) -> None:
-        """
-        Initialize a new session with settings.
-
-        Args:
-            session_name: Human-readable session name
-            providers: Cloud providers to analyze
-            llm_provider: LLM to use
-        """
+        """Configure the session: name, providers (with account context) and LLM."""
         self.hot_memory.session_name = session_name
         self.hot_memory.llm_provider = llm_provider
+        connection_context = connection_context or {}
 
-        # Add providers
-        for provider in providers:
-            # In real usage, account_id comes from credentials
-            account_id = f"account_{provider.value}"
-            self.hot_memory.add_provider(provider, account_id)
+        provider_list = [CloudProvider.parse(p) for p in providers]
+        for provider in provider_list:
+            ctx = connection_context.get(provider.value, {}) or {}
+            account_id = str(
+                ctx.get("account_id")
+                or ctx.get("subscription_id")
+                or ctx.get("project_id")
+                or ctx.get("team")
+                or ""
+            )
+            self.hot_memory.add_provider(
+                provider,
+                account_id=account_id,
+                account_name=ctx.get("account_name") or ctx.get("name"),
+                region=ctx.get("region"),
+            )
+        if provider_list:
+            self.hot_memory.set_current_provider(provider_list[0])
 
-        # Set first provider as current
-        if providers:
-            self.hot_memory.set_current_provider(providers[0])
-
-        # Record session start if deep memory enabled
         if self.deep_memory:
             self.deep_memory.record_session_start()
+            if llm_provider:
+                self.deep_memory.set_preferred_llm(llm_provider)
 
-    # ========== QUERY PROCESSING ==========
+    def hydrate(self, records: Iterable[dict[str, Any]]) -> int:
+        """Load persisted history (``SessionMessage.to_dict`` dicts) into cold + hot memory."""
+        records = list(records)
+        loaded = self.cold_memory.load_from_records(records)
+        self.metrics.total_messages = len(self.cold_memory.messages)
+        self.hot_memory.total_messages = sum(1 for r in records if r.get("role") in ("user", "assistant"))
+        self.hot_memory.compression_count = self.cold_memory.compression_count = sum(
+            1 for r in records if r.get("is_summary")
+        )
+        for record in [r for r in records if r.get("role") in ("user", "assistant")][-self.hot_memory.max_recent_interactions :]:
+            self.hot_memory.add_interaction(record["role"], str(record.get("content", "")), record.get("tokens_used", 0))
+        return loaded
 
-    def process_query(
-        self, query: str, user_id: Optional[str] = None
-    ) -> Tuple[str, Dict]:
-        """
-        Process a user query through all memory layers.
+    def set_summarizer(self, summarizer: Summarizer | None) -> None:
+        """Provide an LLM-backed summariser used during compression."""
+        self._summarizer = summarizer
+
+    # ----- query processing -------------------------------------------------------------
+
+    def process_query(self, query: str, user_id: str | None = None) -> tuple[str, dict[str, Any]]:
+        """Retrieve context for a query, record it, and assemble the prompt.
 
         Returns:
             (assembled_prompt, context_data)
         """
-        # 1. RETRIEVE - Search COLD MEMORY for relevant history
-        cold_results = self.cold_memory.search_by_content(query, limit=3)
-        cold_summary = (
-            self.cold_memory.summarize_messages([r.message for r in cold_results])
-            if cold_results
-            else ""
-        )
+        del user_id  # kept for backwards compatibility with earlier signature
 
-        # 2. LOAD - Identify relevant PROCEDURAL MEMORY (skills)
-        relevant_skills = self.procedural_memory.get_relevant_skills(query, limit=3)
+        # 0. Focus the provider the user is talking about
+        detected = self.hot_memory.detect_provider(query)
+        if detected:
+            self.hot_memory.set_current_provider(detected)
+        query_type = detect_query_type(query)
+        self.hot_memory.update_query_type(query_type)
 
-        # 3. RECORD - Add query to COLD MEMORY
-        self._add_message_to_cold(MessageRole.USER, query)
+        # 1. RETRIEVE - relevant history from COLD memory (before adding this query)
+        cold_results = self.cold_memory.search_by_content(query, limit=4)
+        self.metrics.total_retrievals += 1
+        recalled = [r.message for r in cold_results if r.message not in self.cold_memory.messages[-2:]]
+        cold_summary = self.cold_memory.summarize_messages(recalled) if recalled else ""
+        summaries = [m.content for m in self.cold_memory.messages if m.is_summary]
 
-        # 4. LEARN - Update patterns in DEEP MEMORY
+        # 2. LOAD - relevant skills from PROCEDURAL memory
+        relevant_skills = self.procedural_memory.get_relevant_skills(query, limit=2)
+
+        # 3. RECORD - the user turn in COLD + HOT memory
+        provider = self.hot_memory.current_provider.value if self.hot_memory.current_provider else None
+        self._add_message_to_cold(MessageRole.USER, query, provider=provider, tags=query_tags(query))
+        self.hot_memory.add_interaction("user", query)
+        self.hot_memory.increment_message_count()
+
+        # 4. LEARN - DEEP memory patterns
         if self.deep_memory:
             self.deep_memory.observe_query(query)
 
-        # 5. ASSEMBLE - Build complete prompt
-        assembled = self._assemble_complete_prompt(cold_summary, relevant_skills)
+        # 5. ASSEMBLE
+        assembled = self._assemble_complete_prompt(summaries, cold_summary, bool(relevant_skills))
+        self.metrics.last_prompt_words = len(assembled.split())
 
-        # 6. COMPILE - Context data
         context_data = {
-            "retrieved_messages": len(cold_results),
+            "query_type": query_type,
+            "provider": provider,
+            "retrieved_messages": len(recalled),
             "loaded_skills": [s.id for s in relevant_skills],
-            "cold_summary": cold_summary[:200] if cold_summary else "",
+            "cold_summary": cold_summary[:200],
+            "prompt_words": self.metrics.last_prompt_words,
             "metrics": self._get_memory_metrics_dict(),
         }
-
         return assembled, context_data
 
     def record_response(
-        self, response: str, tokens_used: int = 0, analysis_data: Optional[Dict] = None
-    ) -> None:
-        """
-        Record LLM response and any analysis results.
+        self,
+        response: str,
+        tokens_used: int = 0,
+        analysis_data: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Record the assistant turn; returns compression info when compression ran."""
+        provider = self.hot_memory.current_provider.value if self.hot_memory.current_provider else "unknown"
+        tokens_used = int(tokens_used or 0)
+        tags = [str(analysis_data.get("query_type"))] if analysis_data and analysis_data.get("query_type") else []
+        self._add_message_to_cold(MessageRole.ASSISTANT, response, tokens=tokens_used, provider=provider, tags=tags)
 
-        Args:
-            response: LLM response text
-            tokens_used: Tokens consumed
-            analysis_data: Structured analysis results
-        """
-        # Add to COLD MEMORY
-        self._add_message_to_cold(MessageRole.ASSISTANT, response, tokens=tokens_used)
-
-        # Store analysis if provided
         if analysis_data:
-            provider = (
-                self.hot_memory.current_provider.value
-                if self.hot_memory.current_provider
-                else "unknown"
-            )
             self.cold_memory.add_analysis(
                 analysis_id=f"ana_{self.metrics.total_messages}",
-                query=response[:100],
+                query=str(analysis_data.get("summary", response))[:120],
                 provider=provider,
-                query_type="analysis",
+                query_type=str(analysis_data.get("query_type") or "analysis"),
                 result=analysis_data,
                 tokens_used=tokens_used,
             )
 
-        # Update HOT MEMORY
         self.hot_memory.add_interaction("assistant", response, tokens=tokens_used)
         self.hot_memory.increment_message_count()
 
-        # Check if compression needed
-        if self.hot_memory.total_messages % self.compression_threshold == 0:
-            self._compress_session()
+        if self.cold_memory.messages_since_summary() >= self.compression_threshold:
+            return self._compress_session()
+        return None
 
-    # ========== MEMORY ASSEMBLY ==========
+    # ----- assembly ------------------------------------------------------------------------------
 
-    def _assemble_complete_prompt(self, cold_summary: str, skills: List) -> str:
-        """
-        Assemble complete prompt from all 4 memory layers.
+    def _assemble_complete_prompt(self, summaries: list[str], cold_summary: str, has_skills: bool) -> str:
+        """Compose: system prompt, hot context, user profile, history summaries, recall, skills."""
+        sections = [self.hot_memory.system_prompt, self.hot_memory.assemble_context()]
 
-        Order:
-        1. SYSTEM PROMPT (HOT)
-        2. SESSION METADATA (HOT)
-        3. USER CONTEXT (DEEP - optional)
-        4. COLD SUMMARY (COLD)
-        5. SKILLS (PROCEDURAL)
-        6. RECENT CONTEXT (HOT)
-
-        Returns:
-            Complete prompt for injection
-        """
-        sections = []
-
-        # 1. Core system prompt + metadata (HOT)
-        sections.append(self.hot_memory.assemble_prompt_injection())
-
-        # 2. User context (DEEP - optional)
         if self.deep_memory:
             user_context = self.deep_memory.get_user_context_injection()
             if user_context:
-                sections.append("")
                 sections.append(user_context)
 
-        # 3. Cold memory summary
-        if cold_summary:
-            sections.append("")
-            sections.append("### Session History Summary:")
-            sections.append(cold_summary)
+        if summaries:
+            sections.append("### Earlier Session Summary:\n" + "\n".join(summaries[-2:]))
 
-        # 4. Skills (PROCEDURAL)
-        if skills:
-            sections.append("")
-            skills_injection = self.procedural_memory.assemble_skills_injection()
+        if cold_summary:
+            sections.append("### Relevant Earlier Context:\n" + cold_summary)
+
+        if has_skills:
+            skills_injection = self.procedural_memory.assemble_skills_injection(max_tokens=1200)
             if skills_injection:
                 sections.append(skills_injection)
 
-        # 5. Assemble and trim
-        complete = "\n".join(sections)
-
-        # Truncate if too large
+        complete = "\n\n".join(section for section in sections if section)
         words = complete.split()
-        if len(words) > self.context_window_limit:
-            complete = (
-                " ".join(words[: self.context_window_limit]) + "\n...(context trimmed)"
-            )
-
+        if len(words) > self.context_word_limit:
+            complete = " ".join(words[: self.context_word_limit]) + "\n...(context trimmed)"
         return complete
 
-    # ========== LONG-SESSION OPTIMIZATION ==========
+    # ----- compression ----------------------------------------------------------------------------
 
-    def _compress_session(self) -> None:
-        """
-        Compress long sessions to maintain context window.
-
-        Strategy:
-        - Summarize old COLD MEMORY messages
-        - Clear PROCEDURAL MEMORY
-        - Update DEEP MEMORY with patterns
-        """
-        old_count, summary = self.cold_memory.compress_old_messages(days=7)
-
-        if old_count > 0:
+    def _compress_session(self) -> dict[str, Any]:
+        compressed, summary = self.cold_memory.compress(keep_recent=self.recent_window, summarizer=self._summarizer)
+        result = {"compressed_messages": compressed, "pruned_messages": 0, "summary": summary}
+        if compressed:
             self.hot_memory.increment_compression_count()
             self.metrics.compression_count += 1
             self.metrics.last_compression_time = datetime.now()
+        return result
 
-            # Store summary
-            if summary:
-                self._add_message_to_cold(
-                    MessageRole.SYSTEM, f"[Compression: {summary}]"
-                )
-
-    def force_compression(self) -> Dict:
-        """
-        Force immediate compression of session.
-
-        Returns:
-            Compression results
-        """
-        old_count, summary = self.cold_memory.compress_old_messages(days=1)
-        pruned = self.cold_memory.prune_retention_window()
-
+    def force_compression(self) -> dict[str, Any]:
+        """Compress now, regardless of thresholds."""
+        result = self._compress_session()
+        result["pruned_messages"] = self.cold_memory.prune_retention_window()
         self.procedural_memory.clear_loaded_skills()
         self.hot_memory.clear_interactions()
+        return result
 
-        return {
-            "compressed_messages": old_count,
-            "pruned_messages": pruned,
-            "summary": summary[:200] if summary else "",
-        }
-
-    # ========== UTILITY METHODS ==========
+    # ----- utilities ----------------------------------------------------------------------------------
 
     def _add_message_to_cold(
         self,
         role: MessageRole,
         content: str,
         tokens: int = 0,
-        provider: Optional[str] = None,
+        provider: str | None = None,
+        tags: list[str] | None = None,
     ) -> StoredMessage:
-        """Add message to COLD MEMORY"""
-        msg_id = f"msg_{self.metrics.total_messages}_{role.value}"
+        self.metrics.total_messages += 1
         if provider is None and self.hot_memory.current_provider:
             provider = self.hot_memory.current_provider.value
-
         return self.cold_memory.add_message(
-            msg_id=msg_id,
+            msg_id=f"msg_{self.metrics.total_messages}_{role.value}",
             role=role,
             content=content,
             provider=provider,
             tokens=tokens,
-            tags=[],
+            tags=tags or [],
         )
 
-    def get_memory_status(self) -> Dict:
-        """
-        Get current status of all memory layers.
+    def deep_memory_state(self) -> dict[str, Any] | None:
+        """Snapshot of the deep-memory layer for persistence."""
+        return self.deep_memory.to_dict() if self.deep_memory else None
 
-        Returns:
-            Status dictionary
-        """
+    def get_memory_status(self) -> dict[str, Any]:
+        """Status of every layer."""
         return {
             "hot_memory": self.hot_memory.get_session_stats(),
             "cold_memory": self.cold_memory.get_stats(),
             "procedural_memory": {
                 "total_skills": len(self.procedural_memory.skills),
-                "loaded_skills": len(self.procedural_memory.loaded_skills),
+                "loaded_skills": sorted(self.procedural_memory.loaded_skills),
             },
             "deep_memory": self.deep_memory.get_stats() if self.deep_memory else None,
             "metrics": self._get_memory_metrics_dict(),
         }
 
-    def _get_memory_metrics_dict(self) -> Dict:
-        """Get metrics as dictionary"""
+    def _get_memory_metrics_dict(self) -> dict[str, Any]:
         return {
             "total_messages": self.metrics.total_messages,
+            "total_retrievals": self.metrics.total_retrievals,
             "compression_count": self.metrics.compression_count,
-            "last_compression": self.metrics.last_compression_time.isoformat()
-            if self.metrics.last_compression_time
-            else None,
+            "compression_threshold": self.compression_threshold,
+            "messages_since_summary": self.cold_memory.messages_since_summary(),
+            "last_compression": (
+                self.metrics.last_compression_time.isoformat() if self.metrics.last_compression_time else None
+            ),
+            "last_prompt_words": self.metrics.last_prompt_words,
         }
 
-    def export_session(self) -> Dict:
-        """
-        Export complete session for archival.
-
-        Returns:
-            Session data dictionary
-        """
+    def export_session(self) -> dict[str, Any]:
+        """Snapshot for archival/export."""
         return {
             "session_id": self.session_id,
             "user_id": self.user_id,
@@ -357,85 +343,12 @@ class MemoryManager:
             "cold_memory_stats": self.cold_memory.get_stats(),
             "message_count": len(self.cold_memory.messages),
             "analysis_count": len(self.cold_memory.analyses),
+            "deep_memory": self.deep_memory_state(),
             "exported_at": datetime.now().isoformat(),
         }
 
     def __repr__(self) -> str:
         return (
-            f"<MemoryManager session={self.session_id} "
-            f"msgs={self.metrics.total_messages} "
+            f"<MemoryManager session={self.session_id} msgs={self.metrics.total_messages} "
             f"compressions={self.metrics.compression_count}>"
         )
-
-
-# ========== EXAMPLE USAGE ==========
-
-if __name__ == "__main__":
-    import json
-
-    print("=" * 70)
-    print("MEMORY MANAGER TESTS (Full 4-Layer System)")
-    print("=" * 70)
-
-    # Create manager
-    mgr = MemoryManager(
-        session_id="sess_example_123", user_id="user_johndoe", enable_deep_memory=True
-    )
-
-    print("\n1. Initialize session:")
-    mgr.initialize_session(
-        session_name="Multi-Cloud Q2 Analysis",
-        providers=[CloudProvider.AWS, CloudProvider.AZURE],
-        llm_provider="bedrock",
-    )
-    print("   ✓ Session initialized")
-    print("   Providers: AWS, Azure")
-    print("   LLM: bedrock")
-
-    print("\n2. Process first query:")
-    prompt, context = mgr.process_query("What are my AWS costs this month?")
-    print(f"   ✓ Prompt assembled ({len(prompt.split())} words)")
-    print(f"   Retrieved: {context['retrieved_messages']} messages")
-    print(f"   Loaded skills: {len(context['loaded_skills'])}")
-
-    print("\n3. Record response:")
-    mgr.record_response(
-        "Your AWS costs: EC2 $2,341...",
-        tokens_used=150,
-        analysis_data={"service": "EC2", "cost": 2341},
-    )
-    print("   ✓ Response recorded")
-
-    print("\n4. Process second query:")
-    prompt2, context2 = mgr.process_query("Compare with Azure")
-    mgr.record_response(
-        "Azure costs are lower: $1,500...",
-        tokens_used=120,
-        analysis_data={"service": "Azure", "cost": 1500},
-    )
-    print("   ✓ Second query processed")
-
-    print("\n5. Memory Status:")
-    status = mgr.get_memory_status()
-    print("   Hot Memory:")
-    print(f"     - Total messages: {status['hot_memory']['total_messages']}")
-    print("   Cold Memory:")
-    print(f"     - Stored messages: {status['cold_memory']['total_messages']}")
-    print("   Procedural Memory:")
-    print(f"     - Total skills: {status['procedural_memory']['total_skills']}")
-    print(f"     - Loaded: {status['procedural_memory']['loaded_skills']}")
-
-    print("\n6. Force Compression:")
-    compression_result = mgr.force_compression()
-    print(f"   Compressed: {compression_result['compressed_messages']} messages")
-    print(f"   Pruned: {compression_result['pruned_messages']} messages")
-
-    print("\n7. Export Session:")
-    export = mgr.export_session()
-    print(f"   Session ID: {export['session_id']}")
-    print(f"   User ID: {export['user_id']}")
-    print(f"   Message count: {export['message_count']}")
-    print(f"   Analysis count: {export['analysis_count']}")
-
-    print("\n8. Full Status Report:")
-    print(json.dumps(mgr.get_memory_status(), indent=2, default=str))

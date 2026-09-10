@@ -10,13 +10,15 @@ Skills categories:
 - Analysis techniques (forecasting, trend analysis, cost reduction)
 """
 
+from __future__ import annotations
+
+import re
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Set
 from enum import Enum
-import json
+from typing import Any
 
 
-class SkillCategory(Enum):
+class SkillCategory(str, Enum):
     """Skill categories"""
 
     AWS = "aws"
@@ -44,8 +46,8 @@ class Skill:
     name: str  # "EC2 Cost Analysis"
     category: SkillCategory
     content: str  # Markdown content
-    tags: List[str] = field(default_factory=list)  # ["cost", "ec2", "trend"]
-    providers: List[str] = field(default_factory=list)  # ["aws"]
+    tags: list[str] = field(default_factory=list)  # ["cost", "ec2", "trend"]
+    providers: list[str] = field(default_factory=list)  # ["aws"]
     token_count: int = 0
     version: str = "1.0"
     updated_at: str = ""
@@ -61,7 +63,7 @@ class Skill:
 
     def matches_query(self, query: str) -> float:
         """
-        Check if this skill matches a query.
+        Score how well this skill matches a query.
 
         Args:
             query: User query
@@ -72,21 +74,28 @@ class Skill:
         query_lower = query.lower()
         score = 0.0
 
-        # Tag matching
-        if any(tag in query_lower for tag in self.tags):
-            score += 0.5
+        # Tag matching (whole words, tolerate plurals: cost/costs, tag/tags)
+        tag_hits = sum(
+            1 for tag in self.tags if re.search(rf"\b{re.escape(tag.lower())}(s|es)?\b", query_lower)
+        )
+        if tag_hits:
+            score += 0.4 + min(0.2, 0.1 * (tag_hits - 1))
 
-        # Name matching
+        # Provider matching
+        if any(re.search(rf"\b{re.escape(p)}\b", query_lower) for p in self.providers):
+            score += 0.2
+
+        # Name / id matching
         if self.name.lower() in query_lower or self.id in query_lower:
             score += 0.3
 
-        # Content matching
-        if query_lower in self.content.lower():
+        # Content matching (phrase appears in the skill body)
+        if len(query_lower) > 3 and query_lower in self.content.lower():
             score += 0.2
 
         return min(score, 1.0)
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary"""
         return {
             "id": self.id,
@@ -113,8 +122,8 @@ class ProceduralMemory:
 
     def __init__(self):
         """Initialize procedural memory"""
-        self.skills: Dict[str, Skill] = {}
-        self.loaded_skills: Set[str] = set()  # Track which are in memory
+        self.skills: dict[str, Skill] = {}
+        self.loaded_skills: set[str] = set()  # Track which are in memory
         self._load_builtin_skills()
 
     # ========== SKILL REGISTRY ==========
@@ -125,8 +134,8 @@ class ProceduralMemory:
         name: str,
         category: SkillCategory,
         content: str,
-        tags: Optional[List[str]] = None,
-        providers: Optional[List[str]] = None,
+        tags: list[str | None] = None,
+        providers: list[str | None] = None,
         description: str = "",
     ) -> Skill:
         """
@@ -342,6 +351,37 @@ class ProceduralMemory:
             description="Analyze GCP Compute Engine costs",
         )
 
+        # DigitalOcean Skills
+        self.register_skill(
+            "digitalocean/droplet_costs",
+            "DigitalOcean Cost Management",
+            SkillCategory.DIGITALOCEAN,
+            """# DigitalOcean Cost Management
+
+## Billing Model
+1. **Droplets** - Hourly, capped at the monthly price of the size
+2. **Volumes** - Per GB-month block storage
+3. **Load balancers** - Flat monthly price per size unit
+4. **Managed databases** - Per node, by plan size
+5. **Bandwidth** - Pooled transfer allowance per droplet; overage billed per GB
+
+## Cost Optimization
+- Power off is not enough: destroy droplets you are not using (powered-off droplets still bill)
+- Snapshot then destroy idle droplets; restore later if needed
+- Resize droplets to match utilisation; use CPU-optimised only where needed
+- Remove detached volumes and old snapshots
+- Consolidate small managed databases
+
+## Analysis Tips
+- Use the billing summary for month-to-date usage and invoices for history
+- Use resource costs to estimate the run-rate from what is currently deployed
+- Compare invoice trend month over month to spot growth
+""",
+            tags=["cost", "droplet", "digitalocean", "optimization"],
+            providers=["digitalocean"],
+            description="Understand and reduce DigitalOcean spend",
+        )
+
         # Cross-cloud Skills
         self.register_skill(
             "cross_cloud/multi_cloud_comparison",
@@ -374,8 +414,8 @@ class ProceduralMemory:
 - Data consistency
 - Cross-cloud networking
 """,
-            tags=["comparison", "cost", "multi-cloud"],
-            providers=["aws", "azure", "gcp"],
+            tags=["comparison", "compare", "cost", "multi-cloud"],
+            providers=["aws", "azure", "gcp", "digitalocean"],
             description="Compare costs across cloud providers",
         )
 
@@ -412,8 +452,8 @@ class ProceduralMemory:
 - Not accounting for anomalies
 - Insufficient historical data
 """,
-            tags=["forecast", "analysis", "prediction"],
-            providers=["aws", "azure", "gcp"],
+            tags=["forecast", "analysis", "prediction", "projection"],
+            providers=["aws", "azure", "gcp", "digitalocean"],
             description="Techniques for forecasting cloud costs",
         )
 
@@ -456,18 +496,18 @@ class ProceduralMemory:
 4. Implement changes
 5. Measure results
 """,
-            tags=["optimization", "cost-reduction", "strategy"],
-            providers=["aws", "azure", "gcp"],
+            tags=["optimization", "optimize", "cost-reduction", "savings", "reduce", "strategy"],
+            providers=["aws", "azure", "gcp", "digitalocean"],
             description="Cost reduction strategies and tactics",
         )
 
     # ========== SKILL LOOKUP ==========
 
-    def get_skill(self, skill_id: str) -> Optional[Skill]:
+    def get_skill(self, skill_id: str) -> Skill | None:
         """Get a skill by ID"""
         return self.skills.get(skill_id)
 
-    def load_skill(self, skill_id: str) -> Optional[Skill]:
+    def load_skill(self, skill_id: str) -> Skill | None:
         """
         Load a skill into memory (for injection).
 
@@ -486,7 +526,7 @@ class ProceduralMemory:
         """Remove skill from memory (save tokens)"""
         self.loaded_skills.discard(skill_id)
 
-    def get_loaded_skills(self) -> List[Skill]:
+    def get_loaded_skills(self) -> list[Skill]:
         """Get all currently loaded skills"""
         return [self.skills[sid] for sid in self.loaded_skills if sid in self.skills]
 
@@ -499,10 +539,10 @@ class ProceduralMemory:
     def search_skills(
         self,
         query: str,
-        category_filter: Optional[SkillCategory] = None,
-        provider_filter: Optional[str] = None,
+        category_filter: SkillCategory | None = None,
+        provider_filter: str | None = None,
         limit: int = 5,
-    ) -> List[Skill]:
+    ) -> list[Skill]:
         """
         Search for relevant skills.
 
@@ -533,21 +573,21 @@ class ProceduralMemory:
         results.sort(key=lambda x: x[1], reverse=True)
         return [skill for skill, _ in results[:limit]]
 
-    def search_by_provider(self, provider: str) -> List[Skill]:
+    def search_by_provider(self, provider: str) -> list[Skill]:
         """Get all skills for a provider"""
         return [s for s in self.skills.values() if provider in s.providers]
 
-    def search_by_category(self, category: SkillCategory) -> List[Skill]:
+    def search_by_category(self, category: SkillCategory) -> list[Skill]:
         """Get all skills in a category"""
         return [s for s in self.skills.values() if s.category == category]
 
-    def search_by_tag(self, tag: str) -> List[Skill]:
+    def search_by_tag(self, tag: str) -> list[Skill]:
         """Get all skills with a tag"""
         return [s for s in self.skills.values() if tag in s.tags]
 
     # ========== SKILL ASSEMBLY ==========
 
-    def get_relevant_skills(self, query: str, limit: int = 3) -> List[Skill]:
+    def get_relevant_skills(self, query: str, limit: int = 3) -> list[Skill]:
         """
         Identify and load relevant skills for a query.
 
@@ -598,15 +638,15 @@ class ProceduralMemory:
 
         result = "\n".join(lines)
 
-        # Truncate if too long
+        # Truncate if too long (rough 4 chars per token)
         if len(result.split()) > max_tokens:
-            result = result[: max_tokens * 4] + "\n...(truncated)"
+            result = result[: max_tokens * 4].rstrip() + "\n...(truncated)"
 
         return result
 
     # ========== STATISTICS ==========
 
-    def get_stats(self) -> Dict:
+    def get_stats(self) -> dict[str, Any]:
         """Get procedural memory statistics"""
         return {
             "total_skills": len(self.skills),
@@ -620,47 +660,3 @@ class ProceduralMemory:
 
     def __repr__(self) -> str:
         return f"<ProceduralMemory skills={len(self.skills)} loaded={len(self.loaded_skills)}>"
-
-
-# ========== EXAMPLE USAGE ==========
-
-if __name__ == "__main__":
-    import json
-
-    # Create procedural memory
-    proc_mem = ProceduralMemory()
-
-    print("=" * 60)
-    print("PROCEDURAL MEMORY TESTS")
-    print("=" * 60)
-
-    # Show stats
-    print("\n1. Statistics:")
-    print(json.dumps(proc_mem.get_stats(), indent=2))
-
-    # Search for skills
-    print("\n2. Search for 'EC2 optimization':")
-    skills = proc_mem.search_skills("EC2 optimization")
-    for skill in skills:
-        print(f"   - {skill.name} ({skill.category.value})")
-        print(f"     Tags: {', '.join(skill.tags)}")
-        print(f"     Preview: {skill.get_preview()}")
-
-    # Get skills by provider
-    print("\n3. AWS Skills:")
-    aws_skills = proc_mem.search_by_provider("aws")
-    for skill in aws_skills:
-        print(f"   - {skill.name}")
-
-    # Load relevant skills
-    print("\n4. Load skills for query 'forecast Azure costs':")
-    relevant = proc_mem.get_relevant_skills("forecast Azure costs", limit=2)
-    for skill in relevant:
-        print(f"   ✓ Loaded: {skill.name}")
-
-    print(f"   Total loaded: {len(proc_mem.get_loaded_skills())}")
-
-    # Get injection
-    print("\n5. Skills Injection (first 500 chars):")
-    injection = proc_mem.assemble_skills_injection()
-    print(injection[:500] + "...")

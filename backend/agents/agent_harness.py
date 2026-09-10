@@ -1,439 +1,574 @@
 """
-Agent Harness - Memory-Aware Agent Wrapper
-===========================================
-Updated ShimoAgentHarness that integrates the 4-layer memory system.
+Agent Harness - Memory-Aware Agent Runtime
+==========================================
+``AgentHarness`` is the single runtime used by the CLI and the HTTP API. For a
+session it:
 
-This harness:
-1. Manages memory through MemoryManager
-2. Integrates with Strands Agent for LLM + tools
-3. Handles long-running sessions with automatic compression
-4. Manages cloud provider credentials
-5. Supports multi-user with optional deep memory
+1. Persists the session, its messages and analyses (``SessionStore``)
+2. Maintains the 4-layer memory (``MemoryManager``) and injects it into the prompt
+3. Builds a Strands agent with the tools for the session's cloud providers
+4. Runs queries, parses the structured JSON answer, and records everything
+5. Compresses long sessions automatically and replays history on resume
 """
 
-from typing import Dict, List, Optional, Tuple
-from datetime import datetime
-import json
-import uuid
+from __future__ import annotations
 
-from backend.memory import (
-    MemoryManager,
-    CloudProvider,
+import logging
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any
+
+from backend.agents.cost_analyzer import (
+    build_agent,
+    estimate_tokens,
+    extract_json,
+    normalize_analysis,
+    result_text,
+    tool_calls_from_metrics,
+    usage_from_metrics,
 )
+from backend.agents.llm import build_model
+from backend.agents.prompts import SUMMARIZER_PROMPT, build_base_system_prompt
+from backend.agents.tools import get_tools, tool_names
+from backend.config import SUPPORTED_CLOUD_PROVIDERS, settings
+from backend.memory import CloudProvider, MemoryManager, query_tags
+from backend.memory.cold_memory import StoredMessage
+from backend.models import ChatSession
+from backend.services.session_store import SessionStore
+
+logger = logging.getLogger(__name__)
+
+# Non-secret connection fields that may be stored with the session.
+_CONTEXT_FIELDS = {
+    "aws": ("account_id", "account_name", "region", "auth_method", "notes"),
+    "azure": ("subscription_id", "account_name", "auth_method", "notes"),
+    "gcp": ("project_id", "account_name", "auth_method", "notes"),
+    "digitalocean": ("account_name", "team", "auth_method", "notes"),
+}
+
+# Secret fields that are applied to the running process only, never persisted.
+_SECRET_FIELDS = {
+    "aws": {
+        "access_key_id": "aws_access_key_id",
+        "secret_access_key": "aws_secret_access_key",
+        "session_token": "aws_session_token",
+        "profile": "aws_profile",
+    },
+    "azure": {
+        "tenant_id": "azure_tenant_id",
+        "client_id": "azure_client_id",
+        "client_secret": "azure_client_secret",
+    },
+    "gcp": {"service_account_json": "gcp_service_account_json"},
+    "digitalocean": {"api_token": "digitalocean_api_token"},
+}
+
+
+@dataclass
+class AnalysisTurn:
+    """Outcome of one ``AgentHarness.analyze`` call."""
+
+    success: bool
+    response: str
+    analysis: dict[str, Any]
+    raw_response: str = ""
+    error: str | None = None
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    usage: dict[str, int] = field(default_factory=dict)
+    memory_context: dict[str, Any] = field(default_factory=dict)
+    compression: dict[str, Any] | None = None
+    duration_seconds: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialisable representation."""
+        return {
+            "success": self.success,
+            "response": self.response,
+            "analysis": self.analysis,
+            "error": self.error,
+            "tool_calls": self.tool_calls,
+            "usage": self.usage,
+            "memory": self.memory_context,
+            "compression": self.compression,
+            "duration_seconds": round(self.duration_seconds, 3),
+        }
 
 
 class AgentHarness:
-    """
-    Memory-Aware Agent Harness for Shimo.
-
-    Integration Points:
-    - MemoryManager: All 4 memory layers
-    - Strands Agent: LLM + tool orchestration
-    - Database: Persistence layer
-    - CLI/API: User interfaces
-    """
+    """Memory-aware agent runtime bound to one persisted session at a time."""
 
     def __init__(
         self,
-        session_id: Optional[str] = None,
-        user_id: Optional[str] = None,
-        enable_deep_memory: bool = False,
+        store: SessionStore | None = None,
+        *,
+        callback_handler: Callable[..., Any] | None = None,
+        enable_deep_memory: bool = True,
+        llm_summaries: bool | None = None,
+        agent_factory: Callable[..., Any] | None = None,
     ):
-        """
-        Initialize agent harness.
+        self.store = store or SessionStore()
+        self._owns_store = store is None
+        self.callback_handler = callback_handler
+        self.enable_deep_memory = enable_deep_memory
+        self.llm_summaries = settings.memory_llm_summaries if llm_summaries is None else llm_summaries
+        self._agent_factory = agent_factory or build_agent
 
-        Args:
-            session_id: Session ID (generate if None)
-            user_id: User ID (for analytics)
-            enable_deep_memory: Enable user modeling
-        """
-        self.session_id = session_id or f"sess_{uuid.uuid4().hex[:12]}"
-        self.user_id = user_id
+        self.session: ChatSession | None = None
+        self.memory_manager: MemoryManager | None = None
+        self._model = None
+        self._messages: list[dict[str, Any]] = []
 
-        # Initialize memory manager (4-layer system)
-        self.memory_manager = MemoryManager(
-            session_id=self.session_id,
-            user_id=user_id,
-            enable_deep_memory=enable_deep_memory,
-        )
+        self.is_active = False
+        self.created_at = datetime.now()
+        self.last_activity = datetime.now()
+        self.query_count = 0
+        self.tool_calls: list[dict[str, Any]] = []
 
-        # Session metadata
-        self.session_name: Optional[str] = None
-        self.active_providers: List[CloudProvider] = []
-        self.llm_provider: str = "bedrock"
-        self.credentials: Dict[str, Dict] = {}  # Per-provider credentials
+    # ----- properties ----------------------------------------------------------------
 
-        # Agent state
-        self.is_active: bool = False
-        self.created_at: datetime = datetime.now()
-        self.last_activity: datetime = datetime.now()
-        self.query_count: int = 0
-        self.tool_calls: List[Dict] = []
+    @property
+    def session_id(self) -> str | None:
+        """Id of the bound session."""
+        return self.session.id if self.session else None
 
-        # Strands Agent (will be initialized on first query)
-        self.strands_agent = None
+    @property
+    def session_name(self) -> str | None:
+        """Name of the bound session."""
+        return self.session.name if self.session else None
 
-    # ========== SESSION INITIALIZATION ==========
+    @property
+    def providers(self) -> list[str]:
+        """Enabled cloud providers for the bound session."""
+        return self.session.enabled_providers() if self.session else []
+
+    @property
+    def active_providers(self) -> list[CloudProvider]:
+        """Enabled providers as enum members."""
+        return [CloudProvider.parse(p) for p in self.providers]
+
+    @property
+    def llm_provider(self) -> str:
+        """LLM provider for the bound session."""
+        return self.session.llm_provider if self.session else settings.llm_provider
+
+    @property
+    def connection_context(self) -> dict[str, Any]:
+        """Non-secret connection context stored with the session."""
+        return dict(self.session.connection_context or {}) if self.session else {}
+
+    @property
+    def user_id(self) -> str | None:
+        """User id of the bound session."""
+        return self.session.user_id if self.session else None
+
+    # ----- session lifecycle -----------------------------------------------------------
 
     def create_session(
         self,
         session_name: str,
-        providers: List[CloudProvider],
-        llm_provider: str,
-        credentials: Dict[str, Dict],
-    ) -> str:
+        providers: list[CloudProvider | str],
+        llm_provider: str | None = None,
+        connection_context: dict[str, dict[str, Any]] | None = None,
+        user_id: str | None = None,
+        tags: list[str] | None = None,
+        credentials: dict[str, dict[str, Any]] | None = None,
+    ) -> ChatSession:
+        """Create a new persisted session and bind the harness to it.
+
+        ``credentials`` (if given) is split into non-secret connection context, which is
+        stored, and secrets, which are applied to the running process only.
         """
-        Create a new session with configuration.
+        provider_names = [CloudProvider.parse(p).value for p in providers]
+        if not provider_names:
+            raise ValueError("At least one cloud provider is required")
+        context = dict(connection_context or {})
+        for provider, creds in (credentials or {}).items():
+            safe, _ = self._split_credentials(provider, creds)
+            if safe:
+                context[provider] = {**(context.get(provider) or {}), **safe}
+            self._apply_secrets(provider, creds)
 
-        Args:
-            session_name: Human-readable session name
-            providers: Cloud providers to analyze
-            llm_provider: LLM provider to use
-            credentials: Provider credentials
-
-        Returns:
-            Session ID
-        """
-        self.session_name = session_name
-        self.active_providers = providers
-        self.llm_provider = llm_provider
-        self.credentials = credentials
-        self.is_active = True
-
-        # Initialize memory manager
-        self.memory_manager.initialize_session(
-            session_name=session_name, providers=providers, llm_provider=llm_provider
+        session = self.store.create_session(
+            name=session_name,
+            providers=provider_names,
+            llm_provider=llm_provider,
+            connection_context=context,
+            user_id=user_id,
+            tags=tags,
         )
+        self._attach(session, hydrate=False)
+        logger.info("Created session %s (%s) providers=%s llm=%s", session.id, session.name, provider_names, session.llm_provider)
+        return session
 
-        # Initialize Strands Agent (stub - real implementation uses strands SDK)
-        self._initialize_strands_agent()
+    def load_session(self, session_id: str) -> ChatSession:
+        """Bind to an existing session, replaying its history into memory and the agent."""
+        session = self.store.require_session(session_id)
+        self._attach(session, hydrate=True)
+        logger.info("Loaded session %s (%s) with %d messages", session.id, session.name, session.message_count)
+        return session
 
-        return self.session_id
-
-    def load_session(self, session_id: str) -> bool:
-        """
-        Load existing session from database.
-
-        Args:
-            session_id: Session to load
-
-        Returns:
-            Success status
-        """
-        # In production: load from database
-        self.session_id = session_id
+    def _attach(self, session: ChatSession, hydrate: bool) -> None:
+        self.session = session
         self.is_active = True
         self.last_activity = datetime.now()
+        self._model = None
+        self._messages = []
+        self.tool_calls = []
 
-        return True
+        user_id = session.user_id
+        deep_state = self.store.get_user_profile(user_id) if (user_id and self.enable_deep_memory) else None
+        self.memory_manager = MemoryManager(
+            session_id=session.id,
+            user_id=user_id,
+            enable_deep_memory=self.enable_deep_memory,
+            system_prompt=build_base_system_prompt(self.providers, self.connection_context),
+            compression_threshold=settings.memory_compression_threshold,
+            recent_window=settings.memory_recent_window,
+            context_word_limit=settings.memory_context_word_limit,
+            deep_memory_state=deep_state,
+        )
+        self.memory_manager.initialize_session(
+            session_name=session.name,
+            providers=self.providers,
+            llm_provider=session.llm_provider,
+            connection_context=self.connection_context,
+        )
+        if self.llm_summaries:
+            self.memory_manager.set_summarizer(self._summarize_with_llm)
 
-    def _initialize_strands_agent(self) -> None:
-        """Initialize Strands Agent with current settings"""
-        # This is a stub - actual implementation uses Strands SDK
-        # In real code:
-        # from strands import Agent
-        # self.strands_agent = Agent(
-        #     llm_provider=self.llm_provider,
-        #     tools=self._get_available_tools(),
-        #     system_prompt=self.memory_manager.hot_memory.get_system_prompt()
-        # )
-        pass
+        if hydrate:
+            records = [m.to_dict() for m in self.store.get_messages(session.id)]
+            self.memory_manager.hydrate(records)
+            self._messages = self._build_replay_messages(records, self.memory_manager.recent_window)
+        self.query_count = 0
 
-    # ========== QUERY PROCESSING ==========
+    # ----- credentials -------------------------------------------------------------------
 
-    def analyze(self, query: str, stream: bool = False) -> Tuple[str, Dict]:
-        """
-        Process a user query through memory + LLM + tools.
+    @staticmethod
+    def _split_credentials(provider: str, creds: dict[str, Any] | None) -> tuple[dict[str, Any], dict[str, Any]]:
+        provider = CloudProvider.parse(provider).value
+        creds = creds or {}
+        safe = {k: v for k, v in creds.items() if k in _CONTEXT_FIELDS.get(provider, ()) and v not in (None, "")}
+        secrets = {k: v for k, v in creds.items() if k in _SECRET_FIELDS.get(provider, {}) and v not in (None, "")}
+        return safe, secrets
 
-        Args:
-            query: User query
-            stream: Enable streaming response (bool)
+    def _apply_secrets(self, provider: str, creds: dict[str, Any] | None) -> None:
+        provider = CloudProvider.parse(provider).value
+        _, secrets = self._split_credentials(provider, creds)
+        for key, value in secrets.items():
+            setattr(settings, _SECRET_FIELDS[provider][key], str(value))
+        if provider == "aws" and (creds or {}).get("region"):
+            settings.aws_region = str(creds["region"])
+        if provider == "azure" and (creds or {}).get("subscription_id"):
+            settings.azure_subscription_id = str(creds["subscription_id"])
+        if provider == "gcp" and (creds or {}).get("project_id"):
+            settings.gcp_project_id = str(creds["project_id"])
+        if secrets:
+            self._model = None  # credentials may affect the Bedrock client
 
-        Returns:
-            (response_text, analysis_data)
-        """
-        if not self.is_active:
-            raise RuntimeError("Session not active")
+    def set_provider_credentials(self, provider: CloudProvider | str, credentials: dict[str, Any]) -> None:
+        """Attach provider credentials: context is persisted, secrets stay in-process."""
+        name = CloudProvider.parse(provider).value
+        if name not in SUPPORTED_CLOUD_PROVIDERS:
+            raise ValueError(f"Unsupported provider {name}")
+        safe, _ = self._split_credentials(name, credentials)
+        self._apply_secrets(name, credentials)
+        if self.session is not None:
+            if safe:
+                self.store.update_session(self.session, connection_context={name: safe}, commit=True)
+            if name not in self.providers:
+                self.session.cloud_providers[name] = True
+                self.store.commit()
+            self._refresh_prompt()
 
+    def get_provider_credentials(self, provider: CloudProvider | str) -> dict[str, Any] | None:
+        """Stored (non-secret) connection context for a provider."""
+        return self.connection_context.get(CloudProvider.parse(provider).value)
+
+    def _refresh_prompt(self) -> None:
+        if self.memory_manager and self.session:
+            self.memory_manager.hot_memory.set_system_prompt(
+                build_base_system_prompt(self.providers, self.connection_context)
+            )
+            self.memory_manager.initialize_session(
+                self.session.name, self.providers, self.session.llm_provider, self.connection_context
+            )
+
+    # ----- agent plumbing -----------------------------------------------------------------
+
+    def _ensure_model(self):
+        if self._model is None:
+            self._model = build_model(self.llm_provider)
+        return self._model
+
+    def _make_agent(self, system_prompt: str):
+        assert self.memory_manager is not None
+        return self._agent_factory(
+            system_prompt=system_prompt,
+            providers=self.providers,
+            model=self._ensure_model(),
+            messages=list(self._messages),
+            callback_handler=self.callback_handler,
+            window_size=max(20, self.memory_manager.recent_window * 4),
+        )
+
+    @staticmethod
+    def _build_replay_messages(records: list[dict[str, Any]], recent_window: int) -> list[dict[str, Any]]:
+        """Turn stored turns into an alternating user/assistant Strands message list."""
+        turns = [r for r in records if r.get("role") in ("user", "assistant") and not r.get("is_summary")]
+        messages: list[dict[str, Any]] = []
+        for record in turns[-(recent_window * 2) :]:
+            content = str(record.get("content") or "").strip()
+            role = record["role"]
+            if not content:
+                continue
+            if not messages and role != "user":
+                continue
+            if messages and messages[-1]["role"] == role:
+                messages[-1]["content"][0]["text"] += f"\n\n{content}"
+            else:
+                messages.append({"role": role, "content": [{"text": content}]})
+        if messages and messages[-1]["role"] == "user":
+            messages.pop()
+        return messages
+
+    def _trim_history(self) -> None:
+        """Keep only recent text turns in the agent's conversation after compression."""
+        assert self.memory_manager is not None
+        records = [
+            {"role": m["role"], "content": "".join(b.get("text", "") for b in m.get("content", []) if isinstance(b, dict))}
+            for m in self._messages
+            if m.get("role") in ("user", "assistant")
+        ]
+        self._messages = self._build_replay_messages(records, self.memory_manager.recent_window // 2 or 1)
+
+    def _summarize_with_llm(self, messages: list[StoredMessage]) -> str:
+        """Summarise old turns with the session's model (falls back to extractive on failure)."""
+        transcript = "\n".join(f"{m.role.value}: {m.content}" for m in messages if m.content.strip())
+        if not transcript:
+            return ""
+        agent = self._agent_factory(
+            system_prompt=SUMMARIZER_PROMPT,
+            model=self._ensure_model(),
+            tools=[],
+            callback_handler=None,
+            window_size=4,
+        )
+        return result_text(agent(f"Summarise this conversation:\n\n{transcript[-12000:]}")).strip()
+
+    # ----- query processing -------------------------------------------------------------------
+
+    def analyze(self, query: str, stream: bool = False) -> AnalysisTurn:  # pylint: disable=unused-argument
+        """Run one query through memory, the agent and persistence."""
+        if not self.session or not self.memory_manager:
+            raise RuntimeError("No active session. Call create_session() or load_session() first.")
+        query = query.strip()
+        if not query:
+            raise ValueError("Query must not be empty")
+
+        started = time.perf_counter()
         self.query_count += 1
         self.last_activity = datetime.now()
 
-        # ========== STEP 1: RETRIEVE & ASSEMBLE MEMORY ==========
-
-        # Process query through memory manager
-        assembled_prompt, memory_context = self.memory_manager.process_query(
-            query, user_id=self.user_id
+        assembled_prompt, memory_context = self.memory_manager.process_query(query)
+        provider = memory_context.get("provider")
+        logger.debug(
+            "[MEMORY] recalled=%s skills=%s prompt_words=%s",
+            memory_context.get("retrieved_messages"),
+            memory_context.get("loaded_skills"),
+            memory_context.get("prompt_words"),
         )
 
-        print(f"\n[MEMORY] Retrieved {memory_context['retrieved_messages']} messages")
-        print(f"[MEMORY] Loaded {len(memory_context['loaded_skills'])} skills")
+        self.store.add_message(self.session, "user", query, provider=provider, tags=query_tags(query))
+        self.store.commit()
 
-        # ========== STEP 2: CALL LLM WITH FULL CONTEXT ==========
+        raw = ""
+        tool_calls: list[dict[str, Any]] = []
+        usage: dict[str, int] = {}
+        error: str | None = None
+        try:
+            agent = self._make_agent(assembled_prompt)
+            result = agent(query)
+            self._messages = list(agent.messages)
+            raw = result_text(result)
+            tool_calls = tool_calls_from_metrics(result.metrics)
+            usage = usage_from_metrics(result.metrics)
+            analysis = normalize_analysis(extract_json(raw), raw, query)
+            success = True
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.exception("Agent run failed for session %s", self.session.id)
+            error = f"{type(exc).__name__}: {exc}"
+            analysis = normalize_analysis(None, f"Analysis failed: {error}", query)
+            success = False
 
-        # In production: use Strands Agent
-        # response = self.strands_agent.query(
-        #     query=query,
-        #     system_prompt=assembled_prompt,
-        #     streaming=stream
-        # )
+        response_text = analysis["summary"]
+        tokens = usage.get("total_tokens") or estimate_tokens(raw or response_text)
+        compression = self.memory_manager.record_response(response_text, tokens_used=tokens, analysis_data=analysis)
 
-        # For now: mock response
-        response = self._mock_llm_call(query)
+        stored_analysis = {k: v for k, v in analysis.items() if k not in ("a2ui_messages", "raw_response")}
+        self.store.add_message(
+            self.session,
+            "assistant",
+            response_text,
+            tokens_used=tokens,
+            provider=provider,
+            tags=[analysis["query_type"]] + (["error"] if not success else []),
+            analysis=stored_analysis if success else None,
+        )
+        if success:
+            self.store.update_analysis(self.session, stored_analysis)
 
-        # ========== STEP 3: PARSE & ANALYZE RESPONSE ==========
+        if compression and compression.get("compressed_messages"):
+            self.session.compression_count = (self.session.compression_count or 0) + 1
+            self.store.add_message(
+                self.session, "system", compression["summary"], tags=["summary"], is_summary=True
+            )
+            self._trim_history()
 
-        analysis_data = self._parse_analysis(response)
+        self._persist_deep_memory()
+        self.store.commit()
+        self.tool_calls.extend(tool_calls)
 
-        # ========== STEP 4: RECORD TO MEMORY ==========
-
-        self.memory_manager.record_response(
-            response=response,
-            tokens_used=len(response.split()) * 1.3,  # Rough estimate
-            analysis_data=analysis_data,
+        return AnalysisTurn(
+            success=success,
+            response=response_text,
+            analysis=analysis,
+            raw_response=raw,
+            error=error,
+            tool_calls=tool_calls,
+            usage=usage,
+            memory_context=memory_context,
+            compression=compression,
+            duration_seconds=time.perf_counter() - started,
         )
 
-        # ========== STEP 5: RETURN RESULTS ==========
+    def _persist_deep_memory(self) -> None:
+        if self.memory_manager and self.memory_manager.deep_memory and self.user_id:
+            self.store.save_user_profile(self.user_id, self.memory_manager.deep_memory_state() or {})
 
-        return response, analysis_data
+    # ----- long-session management -------------------------------------------------------------
 
-    def _mock_llm_call(self, query: str) -> str:
-        """
-        Mock LLM call (for demonstration).
-        In production, this uses actual Strands Agent.
-        """
-        provider = self.memory_manager.hot_memory.current_provider
-        provider_str = provider.value.upper() if provider else "UNKNOWN"
-
-        # Simulate analysis based on query
-        if "cost" in query.lower():
-            return (
-                f"Based on your {provider_str} infrastructure, here's the cost analysis:\n"
-                f"- Compute: $2,341 (45%)\n"
-                f"- Storage: $1,234 (24%)\n"
-                f"- Network: $890 (17%)\n"
-                f"- Other: $685 (14%)\n\n"
-                f"Total: $5,150 for this month"
-            )
-        elif "forecast" in query.lower():
-            return (
-                f"Cost forecast for next month ({provider_str}):\n"
-                f"Expected total: $5,450 (+5.8% vs this month)\n"
-                f"Factors: 12% growth in compute, storage optimization -2%"
-            )
-        elif "compare" in query.lower():
-            return (
-                "Multi-cloud comparison:\n"
-                "AWS: $5,150\nAzure: $3,200 (-37.9%)\n"
-                "AWS appears more expensive due to compute-intensive workloads"
-            )
-        else:
-            return "Analysis complete. Results available in dashboard."
-
-    def _parse_analysis(self, response: str) -> Dict:
-        """
-        Parse LLM response into structured analysis data.
-
-        Returns:
-            Analysis dictionary
-        """
-        provider = (
-            self.memory_manager.hot_memory.current_provider.value
-            if self.memory_manager.hot_memory.current_provider
-            else "unknown"
-        )
-
-        return {
-            "provider": provider,
-            "query_type": self._detect_query_type(response),
-            "summary": response[:200],
-            "timestamp": datetime.now().isoformat(),
-        }
-
-    def _detect_query_type(self, response: str) -> str:
-        """Detect type of query from response"""
-        response_lower = response.lower()
-        if "forecast" in response_lower:
-            return "forecast"
-        elif "comparison" in response_lower:
-            return "comparison"
-        elif "optimization" in response_lower:
-            return "optimization"
-        else:
-            return "analysis"
-
-    # ========== LONG-SESSION MANAGEMENT ==========
-
-    def compress_context(self) -> Dict:
-        """
-        Manually compress session context.
-
-        Returns:
-            Compression results
-        """
-        return self.memory_manager.force_compression()
+    def compress_context(self) -> dict[str, Any]:
+        """Manually compress the session context."""
+        if not self.session or not self.memory_manager:
+            raise RuntimeError("No active session")
+        result = self.memory_manager.force_compression()
+        if result.get("compressed_messages"):
+            self.session.compression_count = (self.session.compression_count or 0) + 1
+            self.store.add_message(self.session, "system", result["summary"], tags=["summary"], is_summary=True)
+            self._trim_history()
+            self.store.commit()
+        result["compression_count"] = int(self.session.compression_count or 0)
+        return result
 
     def check_compression_needed(self) -> bool:
-        """Check if automatic compression is needed"""
-        return (
-            self.query_count > 0
-            and self.query_count % self.memory_manager.compression_threshold == 0
-        )
+        """Whether the next response will trigger automatic compression."""
+        if not self.memory_manager:
+            return False
+        remaining = self.memory_manager.compression_threshold - self.memory_manager.cold_memory.messages_since_summary()
+        return remaining <= 2
 
-    # ========== SESSION MANAGEMENT ==========
+    # ----- introspection ---------------------------------------------------------------------------
 
-    def get_session_info(self) -> Dict:
-        """Get current session information"""
-        return {
-            "session_id": self.session_id,
-            "user_id": self.user_id,
-            "session_name": self.session_name,
-            "providers": [p.value for p in self.active_providers],
-            "llm_provider": self.llm_provider,
-            "query_count": self.query_count,
-            "is_active": self.is_active,
-            "created_at": self.created_at.isoformat(),
-            "last_activity": self.last_activity.isoformat(),
-        }
-
-    def get_memory_status(self) -> Dict:
-        """Get all memory layer status"""
-        return self.memory_manager.get_memory_status()
-
-    def export_session(self) -> Dict:
-        """Export session for archival"""
-        export = self.memory_manager.export_session()
-        export.update(
+    def get_session_info(self) -> dict[str, Any]:
+        """Session summary."""
+        info = self.session.to_dict() if self.session else {}
+        info.update(
             {
                 "query_count": self.query_count,
-                "compression_count": self.memory_manager.metrics.compression_count,
+                "is_active": self.is_active,
+                "harness_started_at": self.created_at.isoformat(),
+                "last_activity": self.last_activity.isoformat(),
+                "tools": tool_names(self.providers),
             }
         )
-        return export
+        return info
 
-    # ========== CREDENTIAL MANAGEMENT ==========
+    def get_memory_status(self) -> dict[str, Any]:
+        """Status of the four memory layers."""
+        return self.memory_manager.get_memory_status() if self.memory_manager else {}
 
-    def set_provider_credentials(
-        self, provider: CloudProvider, credentials: Dict
-    ) -> None:
-        """
-        Set credentials for a provider.
-
-        Args:
-            provider: Cloud provider
-            credentials: Provider-specific credentials
-        """
-        self.credentials[provider.value] = credentials
-        # Update hot memory
-        if provider in self.memory_manager.hot_memory.active_providers:
-            ctx = self.memory_manager.hot_memory.provider_contexts[provider]
-            if "account_id" in credentials:
-                ctx.account_id = credentials["account_id"]
-
-    def get_provider_credentials(self, provider: CloudProvider) -> Optional[Dict]:
-        """Get credentials for a provider"""
-        return self.credentials.get(provider.value)
-
-    # ========== DIAGNOSTICS & MONITORING ==========
-
-    def get_health_status(self) -> Dict:
-        """Get agent health status"""
+    def get_health_status(self) -> dict[str, Any]:
+        """Health summary for the CLI ``/health`` command."""
+        if not self.memory_manager:
+            return {"session_active": False}
+        status = self.memory_manager.get_memory_status()
         return {
             "session_active": self.is_active,
+            "llm": f"{self.llm_provider}/{settings.llm_model_name(self.llm_provider)}",
+            "providers": self.providers,
+            "tools": len(get_tools(self.providers)),
             "memory_layers": {
-                "hot": len(self.memory_manager.hot_memory.recent_interactions),
-                "cold": self.memory_manager.cold_memory.get_stats()["total_messages"],
-                "procedural": self.memory_manager.procedural_memory.get_stats()[
-                    "total_skills"
-                ],
+                "hot": status["hot_memory"]["recent_interactions"],
+                "cold": status["cold_memory"]["total_messages"],
+                "procedural": status["procedural_memory"]["total_skills"],
                 "deep": "enabled" if self.memory_manager.deep_memory else "disabled",
             },
             "compression_status": {
-                "compressions": self.memory_manager.metrics.compression_count,
-                "last_compression": self.memory_manager.metrics.last_compression_time.isoformat()
-                if self.memory_manager.metrics.last_compression_time
-                else None,
+                "compressions": status["metrics"]["compression_count"],
+                "threshold": status["metrics"]["compression_threshold"],
+                "messages_since_summary": status["metrics"]["messages_since_summary"],
+                "last_compression": status["metrics"]["last_compression"],
             },
             "query_stats": {
                 "total_queries": self.query_count,
-                "queries_since_compression": self.query_count
-                % self.memory_manager.compression_threshold,
+                "tool_calls": sum(call.get("calls", 0) for call in self.tool_calls),
             },
         }
 
-    def end_session(self) -> Dict:
-        """End session and return summary"""
-        if self.memory_manager.deep_memory:
+    def export_session(self) -> dict[str, Any]:
+        """Full export: persisted session + memory snapshot."""
+        if not self.session:
+            return {}
+        self.store.db.refresh(self.session)
+        export = self.session.to_export()
+        export["memory"] = self.memory_manager.export_session() if self.memory_manager else None
+        export["query_count"] = self.query_count
+        return export
+
+    def list_sessions(self, limit: int = 10, include_archived: bool = False) -> list[dict[str, Any]]:
+        """Recent sessions as dicts."""
+        return [s.to_dict() for s in self.store.list_sessions(limit=limit, include_archived=include_archived)]
+
+    def delete_session(self, session_id: str | None = None, hard: bool = False) -> None:
+        """Archive (default) or permanently delete a session."""
+        target = session_id or self.session_id
+        if not target:
+            raise RuntimeError("No session to delete")
+        if hard:
+            self.store.delete_session(target)
+        else:
+            self.store.archive_session(target)
+        if self.session and self.session.id == target:
+            self.is_active = False
+
+    def end_session(self) -> dict[str, Any]:
+        """Finish the interactive session (keeps it resumable) and return a summary."""
+        if self.memory_manager and self.memory_manager.deep_memory:
             self.memory_manager.deep_memory.record_session_end()
-
+            self._persist_deep_memory()
+            self.store.commit()
         self.is_active = False
-
         return {
             "session_id": self.session_id,
-            "duration_minutes": (datetime.now() - self.created_at).total_seconds() / 60,
+            "duration_minutes": round((datetime.now() - self.created_at).total_seconds() / 60, 2),
             "query_count": self.query_count,
-            "memory_export": self.memory_manager.export_session(),
+            "message_count": int(self.session.message_count or 0) if self.session else 0,
+            "compression_count": int(self.session.compression_count or 0) if self.session else 0,
         }
 
+    def close(self) -> None:
+        """Release the database session if the harness created it."""
+        if self._owns_store:
+            self.store.close()
+
+    def __enter__(self) -> "AgentHarness":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
     def __repr__(self) -> str:
-        return (
-            f"<AgentHarness session={self.session_id} "
-            f"queries={self.query_count} "
-            f"providers={len(self.active_providers)}>"
-        )
-
-
-# ========== EXAMPLE USAGE ==========
-
-if __name__ == "__main__":
-    import json
-
-    print("=" * 70)
-    print("AGENT HARNESS TESTS (Memory-Aware Agent)")
-    print("=" * 70)
-
-    # Create harness
-    harness = AgentHarness(user_id="user_johndoe", enable_deep_memory=True)
-
-    print("\n1. Create Session:")
-    session_id = harness.create_session(
-        session_name="Multi-Cloud Q2 Analysis",
-        providers=[CloudProvider.AWS, CloudProvider.AZURE],
-        llm_provider="bedrock",
-        credentials={
-            "aws": {"account_id": "123456789012"},
-            "azure": {"account_id": "sub-abc123"},
-        },
-    )
-    print(f"   ✓ Session created: {session_id}")
-
-    print("\n2. Query 1: AWS Cost Analysis")
-    response1, data1 = harness.analyze("What are my AWS costs this month?")
-    print(f"   Response: {response1[:100]}...")
-    print(f"   Analysis: {data1}")
-
-    print("\n3. Query 2: Cost Comparison")
-    response2, data2 = harness.analyze("Compare AWS and Azure costs")
-    print(f"   Response: {response2[:100]}...")
-
-    print("\n4. Memory Status:")
-    status = harness.get_memory_status()
-    print(f"   Hot Memory messages: {status['hot_memory']['total_messages']}")
-    print(f"   Cold Memory stored: {status['cold_memory']['total_messages']}")
-    print(f"   Procedural skills: {status['procedural_memory']['total_skills']}")
-
-    print("\n5. Session Info:")
-    info = harness.get_session_info()
-    print(json.dumps(info, indent=2, default=str))
-
-    print("\n6. Health Status:")
-    health = harness.get_health_status()
-    print(json.dumps(health, indent=2, default=str))
-
-    print("\n7. Force Compression:")
-    compression = harness.compress_context()
-    print(f"   Compressed: {compression['compressed_messages']} messages")
-    print(f"   Pruned: {compression['pruned_messages']} messages")
-
-    print("\n8. End Session:")
-    summary = harness.end_session()
-    print(json.dumps(summary, indent=2, default=str))
+        return f"<AgentHarness session={self.session_id} queries={self.query_count} providers={self.providers}>"
