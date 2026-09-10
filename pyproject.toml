@@ -1,35 +1,44 @@
 [build-system]
-requires = ["setuptools>=65.0", "wheel"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "shimo"
-version = "2.0.0"
+version = "2.1.0"
 description = "Shimo - Multi-Cloud Cost Analysis Agent"
 readme = "README.md"
 requires-python = ">=3.10"
-authors = [{name = "Cloud Analytics Team"}]
+license = { text = "MIT" }
+authors = [{ name = "Shimo Contributors" }]
 
 dependencies = [
-    "fastapi==0.115.12",
-    "uvicorn[standard]==0.34.2",
-    "strands-agents==1.36.0",
-    "strands-agents-tools==0.5.0",
-    "boto3==1.39.7",
-    "pydantic==2.11.3",
-    "pydantic-settings==2.9.1",
-    "python-dotenv==1.1.0",
-    "pylint==3.3.7",
-    "sqlalchemy==2.0.36",
-    "alembic==1.15.2",
-    "azure-identity==1.15.0",
-    "azure-mgmt-costmanagement==4.0.1",
-    "azure-mgmt-subscription==3.1.1",
-    "google-cloud-billing==1.13.0",
-    "requests==2.32.3",
-    "typer==0.12.5",
-    "rich==14.0.0",
-    "click==8.1.7",
+    "fastapi>=0.115,<1.0",
+    "uvicorn[standard]>=0.34",
+    "strands-agents[anthropic,ollama,openai]>=1.55,<2.0",
+    "boto3>=1.39",
+    "pydantic>=2.11,<3.0",
+    "pydantic-settings>=2.9",
+    "python-dotenv>=1.1",
+    "sqlalchemy>=2.0.36,<3.0",
+    "azure-identity>=1.19",
+    "azure-mgmt-costmanagement>=4.0",
+    "azure-mgmt-subscription>=3.1",
+    "azure-mgmt-resource>=23.0",
+    "google-cloud-billing>=1.13",
+    "google-cloud-bigquery>=3.25",
+    "google-cloud-asset>=3.27",
+    "google-auth>=2.30",
+    "requests>=2.32",
+    "typer>=0.15",
+    "rich>=14.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "httpx>=0.28",
+    "pylint>=3.3",
 ]
 
 [project.scripts]
@@ -38,6 +47,12 @@ shimo = "backend.shimo_cli:app"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["backend*"]
+exclude = ["backend.tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]
+pythonpath = ["."]
+filterwarnings = ["ignore::DeprecationWarning"]
 
 [tool.pylint."MESSAGES CONTROL"]
 max-line-length = 120

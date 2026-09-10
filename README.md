@@ -1,378 +1,255 @@
 # Shimo - Multi-Cloud Cost Analysis Agent
 
-**Shimo** is an AI-powered cloud cost analytics platform with a custom agent framework supporting AWS, Azure, GCP, and DigitalOcean. Analyze your multi-cloud spending with natural language queries via **CLI** or **Web Chat**, with persistent session management and LLM-powered insights.
+**Shimo** is an AI agent that answers natural-language questions about your cloud spend across **AWS, Azure, GCP and DigitalOcean**. It calls the real billing APIs through tools, keeps a **4-layer memory** so long sessions stay coherent, persists every session to a database, and is available as an interactive **CLI** and a **web chat** with charts.
 
-![Stack](https://img.shields.io/badge/Python-3.12-blue) ![Stack](https://img.shields.io/badge/React-19-blue) ![Stack](https://img.shields.io/badge/FastAPI-0.115-green) ![Stack](https://img.shields.io/badge/Strands_Agents-1.36-purple) ![Stack](https://img.shields.io/badge/Multi_Cloud-AWS_Azure_GCP_DO-orange) ![Stack](https://img.shields.io/badge/TUI_CLI-Typer_Rich-cyan)
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![React](https://img.shields.io/badge/React-19-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-green) ![Strands](https://img.shields.io/badge/Strands_Agents-1.55-purple) ![Clouds](https://img.shields.io/badge/AWS_Azure_GCP_DO-multi--cloud-orange)
 
-## 🎯 Features
+## Features
 
-### Cloud Providers
-- ✅ **AWS** — Cost Explorer, EC2, RDS, Lambda, S3, Organizations
-- ✅ **Azure** — Cost Management API, resource inventory, subscriptions
-- ✅ **GCP** — Cloud Billing API, BigQuery export integration
-- ✅ **DigitalOcean** — Billing API, droplets, volumes, databases
+**Cloud providers (18 tools)**
+- **AWS** - Cost Explorer breakdowns (service, region, account, tag, usage type), daily trend, forecast, resource inventory (EC2, RDS, S3, Lambda)
+- **Azure** - Cost Management by service, daily trend, resource inventory (service principal or `az login`)
+- **GCP** - BigQuery billing export by service and by day, Cloud Billing account info, Cloud Asset inventory (service account or ADC)
+- **DigitalOcean** - balance and invoices, monthly trend, resource run-rate estimate
 
-### Interfaces
-- ✅ **CLI with TUI** — Interactive terminal chat with `/help`, `/sessions`, `/compress`, `/export`
-- ✅ **Web Chat** — React 19 + TypeScript web interface
-- ✅ **Session Management** — Persistent sessions, resume, export, compress context
-- ✅ **API** — RESTful endpoints for programmatic access (`/api/sessions/*`)
+**Agent harness**
+- Strands Agents loop with per-session tools: only the providers enabled for a session are exposed to the model
+- Structured JSON answers (summary, totals, per-provider totals, service breakdown, time series, recommendations, chart hint) rendered as charts in the web UI and tables in the CLI
+- Graceful failures: tool errors are reported in the answer, model outages are recorded as an error turn instead of crashing
+- 6 LLM back-ends: Bedrock, Anthropic, OpenAI, Gemini, Ollama, Unsloth Studio (with Gemini fallback)
 
-### AI & Analysis
-- ✅ **Natural Language Queries** — "Show me my GCP costs by service" → structured analysis
-- ✅ **Multi-LLM Support** — Bedrock, OpenAI, Anthropic, Gemini, Ollama, Unsloth
-- ✅ **Interactive Charts** — Bar, line, pie, area charts (Recharts)
-- ✅ **Cost Trends** — Daily/monthly breakdowns, forecasting
-- ✅ **Context Compression** — `/compress` command for long-running sessions
-- ✅ **Session Memory** — Cross-session LLM summarization (clawsweeper pattern)
+**4-layer memory (persisted)**
+- **Hot** - session metadata, connected accounts and the last few turns, injected into every prompt
+- **Cold** - searchable history hydrated from the database on resume; relevant earlier turns are recalled into the prompt
+- **Procedural** - built-in cost-analysis skills loaded on demand for the current question
+- **Deep** - optional cross-session user profile (topics, providers, preferences) stored per user id
+- Automatic **context compression**: once a session grows past a threshold, older turns are summarised (by the LLM, with an extractive fallback) and the summary is persisted
 
-### Enterprise Features
-- ✅ **Multi-Account** — AWS Organizations, Azure subscriptions, GCP projects
-- ✅ **Custom Credentials** — Per-session cloud provider configuration
-- ✅ **A2UI Messages** — Agent-to-UI protocol for structured outputs
-- ✅ **Session Export** — JSON export for audits, archival, analysis
+**Interfaces**
+- **CLI** (`shimo`) - setup wizard, interactive chat with `/memory`, `/compress`, `/export`, one-shot `shimo ask`, session management
+- **Web chat** - React 19 + Recharts; sessions sidebar, resume with full history, provider/LLM setup, compress and export
+- **REST API** - sessions, chat, messages, analysis cache, compression, export, provider status
 
-## 🏗️ Architecture
+## Architecture
 
 ```
-┌──────────────────────────────────────────────────┐
-│                  User Interfaces                  │
-├──────────────────┬──────────────────────────────┤
-│  Shimo CLI (TUI) │  React Web Chat              │
-│  (Typer + Rich)  │  (http://localhost:5035)    │
-└──────────┬───────┴──────────────────────────────┘
-           │
-    ┌──────▼──────────────────────────────────────┐
-    │      Shimo Agent (FastAPI Backend)          │
-    │   - Session persistence (SQLite)            │
-    │   - Multi-cloud tool orchestration          │
-    │   - Strands Agent integration               │
-    └──────┬────────────────────────────────────┬─┘
-           │                                    │
-    ┌──────▼──────────────┐  ┌──────────────┐  │
-    │  Multi-Cloud Tools  │  │  Multi-LLM   │  │
-    │  ┌─ AWS (boto3)     │  │  ┌─ Bedrock  │  │
-    │  ├─ Azure (SDK)     │  │  ├─ OpenAI   │  │
-    │  ├─ GCP (SDK)       │  │  ├─ Gemini   │  │
-    │  └─ DigitalOcean    │  │  └─ Others   │  │
-    │    (REST API)       │  │              │  │
-    └────────────────────┘  └──────────────┘  │
-                                               │
-    ┌──────────────────────────────────────────┘
-    │
-    └─ SQLite Session Store
-       (messages, analysis, context)
+┌────────────────────┐    ┌──────────────────────┐
+│  CLI (Typer/Rich)  │    │  Web chat (React)    │
+└─────────┬──────────┘    └──────────┬───────────┘
+          │ AgentHarness             │ HTTP /api
+          ▼                          ▼
+┌──────────────────────────────────────────────────────┐
+│ FastAPI backend                                      │
+│  ┌──────────────── AgentHarness ─────────────────┐   │
+│  │ MemoryManager (hot · cold · procedural · deep)│   │
+│  │ Strands Agent  ── tools for enabled providers │   │
+│  │ SessionStore   ── sessions · messages · users │   │
+│  └───────────────────────────────────────────────┘   │
+│        │ LLM (Bedrock/Anthropic/OpenAI/Gemini/…)     │
+│        │ AWS CE · Azure CM · GCP BigQuery · DO API   │
+└────────┼─────────────────────────────────────────────┘
+         ▼
+   SQLite / any SQLAlchemy DB (sessions, session_messages, user_profiles)
 ```
 
-## 🚀 Quick Start
+Every query goes through the same path: memory assembles the prompt (system rules + connected accounts + recalled history + skills), the agent calls tools and answers in JSON, the harness normalises the answer, records it in memory and the database, and compresses history when needed.
+
+## Quick start
 
 ### Prerequisites
+- Docker and Docker Compose, **or** Python 3.10+ ([uv](https://docs.astral.sh/uv/) recommended) and Node 20+
+- Credentials for at least one cloud provider
+- An LLM: Bedrock access, or an Anthropic/OpenAI/Gemini key, or a local Ollama
 
-- Docker & Docker Compose (or Python 3.10+)
-- At least one cloud provider account (AWS/Azure/GCP/DO)
-- API credentials for selected providers
-- LLM API key (Bedrock/OpenAI/Anthropic/etc.)
-
-### 1. Clone & Configure
+### 1. Configure
 
 ```bash
-git clone https://github.com/Faizullah9181/Cloud-Analytics.git
-cd Cloud-Analytics
-cp .env.example .env
+git clone https://github.com/Faizullah9181/Cloud-Analytics.git shimo
+cd shimo
+cp .env.example .env      # then edit .env
 ```
 
-**Edit `.env` with your credentials:**
+Minimal `.env` for AWS + Bedrock:
 
 ```env
-# AWS
-AWS_ACCESS_KEY_ID=xxx
-AWS_SECRET_ACCESS_KEY=xxx
+AWS_ACCESS_KEY_ID=...            # or leave empty and use AWS_PROFILE / instance role
+AWS_SECRET_ACCESS_KEY=...
 AWS_DEFAULT_REGION=us-east-1
-
-# Azure (optional)
-AZURE_TENANT_ID=xxx
-AZURE_CLIENT_ID=xxx
-AZURE_CLIENT_SECRET=xxx
-AZURE_SUBSCRIPTION_ID=xxx
-
-# GCP (optional)
-GCP_PROJECT_ID=xxx
-GCP_SERVICE_ACCOUNT_JSON=/path/to/sa.json
-
-# DigitalOcean (optional)
-DIGITALOCEAN_API_TOKEN=xxx
-
-# LLM Provider
-LLM_PROVIDER=bedrock  # or openai, gemini, anthropic, ollama, unsloth
-BEDROCK_MODEL_ID=us.anthropic.claude-sonnet-4-20250514-v1:0
+LLM_PROVIDER=bedrock
+BEDROCK_MODEL_ID=global.anthropic.claude-sonnet-4-6
 BEDROCK_REGION=us-west-2
 ```
 
-### 2. Run with Docker Compose
+Use `LLM_PROVIDER=anthropic` with `ANTHROPIC_API_KEY` (model `claude-opus-5` by default), `openai`, `gemini`, `ollama` or `unsloth`. See `.env.example` for every option.
+
+### 2. Run with Docker
 
 ```bash
 docker compose up --build
 ```
 
-- **Web Chat**: [http://localhost:5035](http://localhost:5035)
-- **API Docs**: [http://localhost:8001/docs](http://localhost:8001/docs)
-- **Backend**: http://localhost:8001
+- Web chat: http://localhost:5035
+- API docs: http://localhost:8001/docs
+- CLI inside the container: `docker compose exec -it backend shimo chat`
 
-### 3. Use Shimo CLI
+The SQLite database lives in `./data/shimo.db` (bind-mounted).
 
-**Inside Docker:**
+### 3. Run locally
 
 ```bash
-docker compose exec backend shimo chat
+# backend (from the repo root)
+uv sync --extra dev                    # or: python -m venv .venv && pip install -e ".[dev]"
+uv run uvicorn backend.main:app --reload --port 8000
+
+# frontend (another terminal)
+cd frontend && npm install && npm run dev      # http://localhost:5173, proxies /api to :8000
+
+# CLI
+uv run shimo chat
 ```
 
-**Local development:**
+## CLI
 
-```bash
-cd backend
-pip install -r requirements.txt
-python shimo_cli.py chat
 ```
-
-## 📖 Usage
-
-### Web Chat
-
-1. Open [http://localhost:5035](http://localhost:5035)
-2. Type natural language queries:
-   - "What's my AWS spend this month?"
-   - "Show GCP costs by service for the last 7 days"
-   - "Compare Azure and DigitalOcean spending"
-3. View interactive charts, service breakdowns, and recommendations
-4. Sessions auto-save with full message history
-
-### CLI (Shimo Agent)
-
-```bash
-$ shimo chat                          # Start new session
-  Session name: Production Analysis
-  Select cloud providers: AWS, Azure, GCP
-  [Session ID: abc123...]
-
-Shimo> What are my top AWS services by cost?
-[Analyzing...]
-  EC2: $1,234.56 (45%)
-  RDS: $567.89 (21%)
-  S3: $234.56 (9%)
+$ shimo chat
+╭──────────────────────────────────────────────────╮
+│ SHIMO Multi-Cloud Cost Analysis Agent v2.1.0     │
+╰──────────────────────────────────────────────────╯
+Session name [Session 2025-09-10 14:02]: Q3 review
+Step 1 · Cloud providers
+  1 - AWS            configured
+  2 - Azure          not configured
   ...
+Select providers [1]: 1,4
+Step 2 · Account context   (identifiers are saved; secrets are never written to disk)
+Step 3 · LLM provider
+✓ Session created: 4f1c...
 
-Shimo> /sessions                      # List sessions
-  - Production Analysis (15 messages)
-  - Dev Costs (8 messages)
-
-Shimo> /compress                      # Compress context for long sessions
-✓ Context compressed (20 → 5 messages)
-
-Shimo> /export                        # Export session to JSON
-{session data...}
-
-Shimo> /help                          # Show commands
+Shimo> What did I spend on AWS this month by service?
+╭─ Shimo ─────────────────────────────────────────╮
+│ Your AWS spend for September so far is USD ...  │
+╰─────────────────────────────────────────────────╯
+  Total: USD 1,234.56   Period: 2025-09-01 to 2025-09-10   Type: costs
+  Cost by service  ...
+  tools: aws_monthly_cost_breakdown×1 · tokens: 3120 · 6.2s
 ```
-
-**CLI Commands:**
 
 | Command | Description |
 |---------|-------------|
-| `shimo chat [--session ID]` | Start/resume chat |
-| `shimo new` | Create new session |
-| `shimo sessions` | List active sessions |
-| `shimo config` | Show configuration |
-| `shimo export SESSION_ID` | Export session to JSON |
-| `shimo delete SESSION_ID` | Archive session |
+| `shimo chat` | Wizard, then interactive chat. `--session ID` resumes; `--quick -p aws,gcp -l anthropic` skips the wizard |
+| `shimo ask "question" [--session ID] [--json]` | One-shot question (scriptable) |
+| `shimo new` | Create a session without chatting |
+| `shimo sessions [--all]` | List sessions |
+| `shimo resume ID` | Resume a session |
+| `shimo export ID [-o file.json]` | Export messages, analysis and memory snapshot |
+| `shimo delete ID [--hard] [-y]` | Archive (or permanently delete) a session |
+| `shimo providers` / `shimo config` | Show provider configuration and effective settings |
 
-**In-Chat Commands:**
+In-chat commands: `/help`, `/sessions`, `/session`, `/memory`, `/health`, `/tools`, `/compress`, `/export [file]`, `/config`, `/clouds`, `/model`, `/exit`.
 
-| Command | Description |
-|---------|-------------|
-| `/help` | Show command help |
-| `/sessions` | List recent sessions |
-| `/compress` | Compress long context |
-| `/export` | Export current session |
-| `/config` | Show session config |
-| `/clouds` | Show enabled providers |
-| `/exit` | Exit Shimo |
+Secrets entered in the wizard (API tokens, access keys) are applied to the running process only. Account identifiers (account id, subscription id, project id, region) are stored with the session so the agent passes them to tools.
 
-### API Endpoints
+## Web chat
 
-```bash
-# Session Management
-POST   /api/sessions                    # Create session
-GET    /api/sessions                    # List sessions
-GET    /api/sessions/{id}              # Get session
-DELETE /api/sessions/{id}              # Archive session
+1. Open the UI, pick the providers to analyse, optionally enter account identifiers, choose the LLM.
+2. Ask a question. The first message creates a session; every turn is persisted.
+3. Switch sessions in the sidebar to resume with full history; use **Compress** to summarise a long session and **Export** to download it.
 
-# Messages
-POST   /api/sessions/{id}/messages     # Add message
-GET    /api/sessions/{id}/messages     # Get messages
-
-# Analysis
-POST   /api/sessions/{id}/analysis     # Update analysis
-GET    /api/sessions/{id}/analysis     # Get last analysis
-POST   /api/sessions/{id}/export       # Export session
-
-# Legacy (AWS-only)
-POST   /api/analyze                    # Analyze query
-GET    /api/suggestions               # Get suggestions
-```
-
-## 📁 Project Structure
+## API
 
 ```
-Cloud-Analytics/
+GET    /api/health                      service + LLM info
+GET    /api/providers                   configured providers and their tools
+GET    /api/stats                       counters
+GET    /api/suggestions                 example questions
+POST   /api/analyze                     {query, session_id?} - stateless when no session_id
+
+POST   /api/sessions                    {name, cloud_providers, llm_provider?, connection_context?, user_id?}
+GET    /api/sessions?include_archived=  list
+GET    /api/sessions/{id}               (id prefix of 6+ chars accepted)
+PATCH  /api/sessions/{id}               rename / update context / tags
+DELETE /api/sessions/{id}?hard=         archive or delete
+POST   /api/sessions/{id}/chat          {query} -> answer, analysis, tool calls, memory info
+GET    /api/sessions/{id}/messages      history
+POST   /api/sessions/{id}/messages      add a message manually
+GET    /api/sessions/{id}/analysis      last analysis   (POST replaces it)
+POST   /api/sessions/{id}/compress      summarise older turns
+GET    /api/sessions/{id}/export        full export
+GET    /api/sessions/{id}/memory        memory-layer status
+```
+
+Interactive docs: `/docs`.
+
+## Configuration
+
+All settings come from environment variables or `.env` (repository root). Key ones:
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `LLM_PROVIDER` | `bedrock`, `anthropic`, `openai`, `gemini`, `ollama`, `unsloth` | `bedrock` |
+| `BEDROCK_MODEL_ID` / `BEDROCK_REGION` | Bedrock model and region | `global.anthropic.claude-sonnet-4-6` / `us-west-2` |
+| `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` | Anthropic API | - / `claude-opus-5` |
+| `OPENAI_API_KEY` / `OPENAI_MODEL` / `OPENAI_BASE_URL` | OpenAI or any compatible endpoint | - / `gpt-4o` / - |
+| `GEMINI_API_KEY` / `GEMINI_MODEL` | Gemini (OpenAI-compatible endpoint) | - / `gemini-2.5-flash` |
+| `AWS_*`, `AWS_PROFILE`, `AWS_ACCOUNT_ID` | AWS credentials (ambient credentials also work) | region `us-east-1` |
+| `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_SUBSCRIPTION_ID` | Azure service principal (falls back to `DefaultAzureCredential`) | - |
+| `GCP_SERVICE_ACCOUNT_JSON`, `GCP_PROJECT_ID`, `GCP_BILLING_PROJECT_ID`, `GCP_BILLING_DATASET`, `GCP_BILLING_TABLE` | GCP credentials (falls back to ADC) and billing export location | dataset `billing_export` |
+| `DIGITALOCEAN_API_TOKEN` | DigitalOcean API | - |
+| `DATABASE_URL` | SQLAlchemy URL | `sqlite:///./data/shimo.db` |
+| `MEMORY_COMPRESSION_THRESHOLD` / `MEMORY_RECENT_WINDOW` / `MEMORY_LLM_SUMMARIES` | Compression behaviour | `20` / `10` / `true` |
+| `CORS_ORIGINS` | Allowed web origins | localhost dev ports |
+
+GCP cost tools read the standard BigQuery billing export (`gcp_billing_export_v1_*`). Enable the export in the Cloud Console and point `GCP_BILLING_DATASET` at it.
+
+## Project structure
+
+```
+shimo/
 ├── backend/
+│   ├── main.py                 FastAPI app (uvicorn backend.main:app)
+│   ├── shimo_cli.py            `shimo` CLI
+│   ├── config.py               Settings (pydantic-settings)
+│   ├── database.py             Engine, session factory, init_db
+│   ├── schemas.py              API schemas
+│   ├── models/session.py       ChatSession, SessionMessage, UserProfile
+│   ├── services/session_store.py  Persistence layer
 │   ├── agents/
-│   │   ├── cost_analyzer.py          # Strands Agent with multi-LLM
-│   │   ├── shimo_agent.py            # Shimo Agent core
-│   │   └── tools/
-│   │       ├── aws_cost_tools.py     # 8 AWS tools
-│   │       ├── azure_cost_tools.py   # 3 Azure tools
-│   │       ├── gcp_billing_tools.py  # 3 GCP tools
-│   │       └── digitalocean_tools.py # 3 DigitalOcean tools
-│   ├── api/
-│   │   ├── routes.py                 # Legacy AWS endpoints
-│   │   └── sessions.py               # Session management API
-│   ├── models/
-│   │   └── session.py                # SQLAlchemy models (Session, Message, Credential)
-│   ├── database.py                   # SQLite + SQLAlchemy setup
-│   ├── config.py                     # Settings (all providers)
-│   ├── main.py                       # FastAPI app
-│   ├── shimo_cli.py                  # CLI entry point (Typer)
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   ├── .pylintrc
-│   └── pyproject.toml
-├── frontend/
-│   ├── src/
-│   │   ├── components/               # React components
-│   │   ├── api/                      # API client
-│   │   ├── types/                    # TypeScript types
-│   │   └── App.tsx
-│   ├── Dockerfile
-│   ├── vite.config.ts
-│   └── package.json
+│   │   ├── agent_harness.py    Memory + agent + persistence runtime
+│   │   ├── cost_analyzer.py    Agent construction, JSON parsing, normalisation
+│   │   ├── llm.py              Model factory for the 6 LLM providers
+│   │   ├── prompts.py          System prompt and connected-accounts block
+│   │   └── tools/              aws_, azure_, gcp_, digitalocean_ tools + registry
+│   ├── memory/                 hot, cold, procedural, deep layers + manager
+│   ├── a2ui/                   Agent-to-UI payload generator
+│   ├── api/                    routes.py (system) and sessions.py
+│   └── tests/                  pytest suite (fake model, no network)
+├── frontend/                   React 19 + Vite + Tailwind + Recharts
 ├── docker-compose.yml
-├── .env.example
-└── README.md
+├── pyproject.toml              dependencies, `shimo` entry point, pytest config
+└── .env.example
 ```
 
-## 🔧 Development
-
-### Local Setup
+## Development
 
 ```bash
-# Backend
-cd backend
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn main:app --reload --port 8001
-
-# Frontend (in another terminal)
-cd frontend
-npm install
-npm run dev
+uv run pytest                                  # backend tests (offline, fake LLM)
+uv run pylint backend --rcfile=backend/.pylintrc --ignore=tests
+cd frontend && npm run lint && npm run typecheck && npm run build
 ```
 
-- Backend: [http://localhost:8001](http://localhost:8001)
-- Frontend: [http://localhost:5173](http://localhost:5173)
+### Adding a cloud provider
 
-### Testing
+1. Create `backend/agents/tools/<provider>_tools.py` with `@tool` functions that return plain dicts (errors as `{"provider": ..., "error": ...}` via `error_result`).
+2. Register the tool list in `backend/agents/tools/__init__.py` (`TOOLS_BY_PROVIDER`).
+3. Add the provider to `SUPPORTED_CLOUD_PROVIDERS`, `Settings.provider_status()` and the connection block in `backend/agents/prompts.py`.
+4. Add the enum member to `backend/memory/hot_memory.py` and a skill in `procedural_memory.py`.
 
-```bash
-# Lint backend
-pylint backend/**/*.py
+## Security notes
 
-# Lint frontend
-npm run lint
-```
+- Cloud and LLM secrets are read from the environment and never written to the database or exports. Sessions store only identifiers (account, subscription, project, region).
+- Secrets entered in the CLI wizard live in the process for that run only.
+- Restrict `CORS_ORIGINS` and put the API behind authentication before exposing it beyond localhost; the API itself is unauthenticated.
 
-### Adding New Cloud Providers
+## License
 
-1. Create `backend/agents/tools/{provider}_tools.py`:
-
-```python
-from strands_agents import tool
-
-@tool(description="Get provider costs by service")
-def provider_cost_by_service(project_id: str, start_date: str, end_date: str) -> dict:
-    """Implement your provider API calls here."""
-    return {"provider": "name", "services": {...}}
-```
-
-2. Update `backend/config.py` with credentials
-3. Add tools to `cost_analyzer.py` agent definition
-4. Test via CLI: `shimo chat`
-
-## 📊 Multi-Cloud Cost Examples
-
-### AWS to Azure Cost Parity
-
-```
-Shimo> Compare my AWS and Azure spending by service
-
-Results:
-AWS:                           Azure:
-├─ Compute: $2,500 (42%)      ├─ Virtual Machines: $1,800 (35%)
-├─ Storage: $800 (13%)        ├─ Storage: $900 (18%)
-├─ Database: $1,200 (20%)     └─ SQL Database: $2,500 (49%)
-└─ Networking: $950 (16%)
-```
-
-### GCP Budget Alert
-
-```
-Shimo> Alert me if GCP spending exceeds $5,000 this month
-
-✓ Analysis configured
-  Current: $3,200 (64% of budget)
-  Projected: $4,100 by month-end
-  Status: On track
-```
-
-### DigitalOcean Cost Optimization
-
-```
-Shimo> Find ways to save on DigitalOcean
-
-Recommendations:
-1. Downsize 3 idle droplets → Save $150/month
-2. Enable automated snapshots → Save $50/month
-3. Consolidate to 1 load balancer → Save $20/month
-Total potential savings: $220/month
-```
-
-## 🔐 Security
-
-- **Credentials**: Stored encrypted in SQLite (at-rest encryption via SQLAlchemy)
-- **Sessions**: Per-session credential isolation
-- **API**: All endpoints require valid session ID
-- **CORS**: Restricted to configured origins
-- **CLI**: Local-only by default (no cloud credential storage in files)
-
-## 📝 License
-
-MIT — See LICENSE file
-
-## 🤝 Contributing
-
-Contributions welcome! Please:
-
-1. Fork the repo
-2. Create a feature branch (`git checkout -b feature/amazing`)
-3. Commit changes (`git commit -m "Add amazing feature"`)
-4. Push to branch (`git push origin feature/amazing`)
-5. Open Pull Request
-
-## 💬 Support
-
-- **Issues**: [GitHub Issues](https://github.com/Faizullah9181/Cloud-Analytics/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/Faizullah9181/Cloud-Analytics/discussions)
-
----
-
-**Built with ❤️ using Strands Agents, FastAPI, React, and cloud wisdom**
+MIT

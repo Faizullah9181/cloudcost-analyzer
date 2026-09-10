@@ -11,9 +11,17 @@ env/
 dist/
 build/
 *.egg-info/
+frontend/dist/
 
 # Environment
 .env
+.env.local
+
+# Data
+data/
+*.db
+*.sqlite
+*.sqlite3
 
 # IDE
 .vscode/
@@ -28,9 +36,8 @@ docker-compose.override.yml
 # Logs
 *.log
 
-# Coverage
+# Test / coverage
 .coverage
 htmlcov/
 .pytest_cache/
-*downloader.py
-cloud_analytics.db
+.ruff_cache/
