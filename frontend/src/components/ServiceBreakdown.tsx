@@ -1,12 +1,13 @@
-import { ArrowUpRight, ArrowDownRight, Minus } from 'lucide-react';
+import { ArrowUpRight, ArrowDownRight } from 'lucide-react';
 import type { CostBreakdown } from '../types';
 
 interface ServiceBreakdownProps {
   services: CostBreakdown[];
+  currency?: string;
 }
 
-export default function ServiceBreakdown({ services }: ServiceBreakdownProps) {
-  const maxCost = Math.max(...services.map((s) => s.cost));
+export default function ServiceBreakdown({ services, currency = 'USD' }: ServiceBreakdownProps) {
+  const maxCost = Math.max(0, ...services.map((s) => s.cost));
 
   return (
     <div className="bg-gray-800/50 rounded-xl p-5 border border-gray-700/50">
@@ -15,15 +16,15 @@ export default function ServiceBreakdown({ services }: ServiceBreakdownProps) {
         {services.slice(0, 15).map((svc) => (
           <div key={svc.service} className="flex items-center gap-3">
             <div className="flex-1 min-w-0">
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-xs text-gray-300 truncate">{svc.service}</span>
-                <div className="flex items-center gap-2">
+              <div className="flex items-center justify-between mb-1 gap-3">
+                <span className="text-xs text-gray-300 truncate" title={svc.service}>{svc.service}</span>
+                <div className="flex items-center gap-2 flex-shrink-0">
                   <span className="text-xs font-mono text-gray-200">
-                    ${svc.cost.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                    {currency} {svc.cost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                   </span>
                   {svc.change !== 0 && (
                     <span className={`text-xs flex items-center gap-0.5 ${svc.change > 0 ? 'text-red-400' : 'text-green-400'}`}>
-                      {svc.change > 0 ? <ArrowUpRight className="w-3 h-3" /> : svc.change < 0 ? <ArrowDownRight className="w-3 h-3" /> : <Minus className="w-3 h-3" />}
+                      {svc.change > 0 ? <ArrowUpRight className="w-3 h-3" /> : <ArrowDownRight className="w-3 h-3" />}
                       {Math.abs(svc.change).toFixed(1)}%
                     </span>
                   )}
@@ -32,7 +33,7 @@ export default function ServiceBreakdown({ services }: ServiceBreakdownProps) {
               <div className="w-full bg-gray-700 rounded-full h-1.5">
                 <div
                   className="bg-primary-500 h-1.5 rounded-full transition-all duration-500"
-                  style={{ width: `${(svc.cost / maxCost) * 100}%` }}
+                  style={{ width: `${maxCost > 0 ? (svc.cost / maxCost) * 100 : 0}%` }}
                 />
               </div>
             </div>
