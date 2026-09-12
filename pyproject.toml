@@ -3,9 +3,22 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "shimo"
-version = "2.1.0"
-description = "Shimo - Multi-Cloud Cost Analysis Agent"
+name = "cloudcost-analyzer"
+version = "2.2.0"
+description = "CloudCost Analyzer - AI-powered multi-cloud cost analysis and FinOps agent (Shimo) for AWS, Azure, GCP and DigitalOcean"
+keywords = [
+    "cloud-cost", "finops", "cost-optimization", "aws-cost-explorer", "azure-cost-management",
+    "gcp-billing", "digitalocean", "multi-cloud", "ai-agent", "llm", "strands-agents", "cost-analysis",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Monitoring",
+    "Topic :: Office/Business :: Financial",
+]
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -40,6 +53,11 @@ dev = [
     "httpx>=0.28",
     "pylint>=3.3",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Faizullah9181/cloudcost-analyzer"
+Repository = "https://github.com/Faizullah9181/cloudcost-analyzer"
+Issues = "https://github.com/Faizullah9181/cloudcost-analyzer/issues"
 
 [project.scripts]
 shimo = "backend.shimo_cli:app"

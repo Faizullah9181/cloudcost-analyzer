@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#020617"/>
+      <stop offset="1" stop-color="#0f172a"/>
+    </linearGradient>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#38bdf8"/>
+      <stop offset="1" stop-color="#6366f1"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <circle cx="1040" cy="120" r="260" fill="#6366f1" opacity="0.12"/>
+  <circle cx="200" cy="560" r="220" fill="#38bdf8" opacity="0.10"/>
+  <rect x="96" y="96" width="84" height="84" rx="20" fill="url(#g)"/>
+  <path d="M120 152a12 12 0 0 1-1.7-23.9A17 17 0 0 1 151 126a12.5 12.5 0 0 1 2 26H120z" fill="#0f172a"/>
+  <text x="200" y="152" font-family="Inter, Segoe UI, sans-serif" font-size="52" font-weight="700" fill="#f8fafc">CloudCost Analyzer</text>
+  <text x="200" y="196" font-family="Inter, Segoe UI, sans-serif" font-size="24" fill="#94a3b8">AI multi-cloud cost analysis &amp; FinOps agent · powered by Shimo</text>
+  <text x="96" y="320" font-family="Inter, Segoe UI, sans-serif" font-size="40" font-weight="600" fill="#e2e8f0">Ask your cloud bill anything.</text>
+  <text x="96" y="372" font-family="Inter, Segoe UI, sans-serif" font-size="26" fill="#94a3b8">"Compare my AWS and Azure spend this month and tell me where to save."</text>
+  <g font-family="Inter, Segoe UI, sans-serif" font-size="22" font-weight="600" fill="#e0f2fe">
+    <rect x="96" y="440" width="120" height="52" rx="26" fill="#1e293b"/><text x="156" y="474" text-anchor="middle">AWS</text>
+    <rect x="232" y="440" width="140" height="52" rx="26" fill="#1e293b"/><text x="302" y="474" text-anchor="middle">Azure</text>
+    <rect x="388" y="440" width="120" height="52" rx="26" fill="#1e293b"/><text x="448" y="474" text-anchor="middle">GCP</text>
+    <rect x="524" y="440" width="220" height="52" rx="26" fill="#1e293b"/><text x="634" y="474" text-anchor="middle">DigitalOcean</text>
+  </g>
+  <text x="96" y="560" font-family="JetBrains Mono, monospace" font-size="22" fill="#38bdf8">$ shimo chat   ·   CLI + web chat   ·   4-layer memory   ·   charts &amp; recommendations</text>
+</svg>

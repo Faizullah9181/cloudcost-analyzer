@@ -25,7 +25,7 @@ from rich.table import Table  # noqa: E402  pylint: disable=wrong-import-positio
 from backend.config import SUPPORTED_CLOUD_PROVIDERS, SUPPORTED_LLM_PROVIDERS, settings  # noqa: E402  pylint: disable=wrong-import-position
 from backend.database import init_db  # noqa: E402  pylint: disable=wrong-import-position
 
-app = typer.Typer(help="Shimo - Multi-Cloud Cost Analysis Agent", no_args_is_help=True, add_completion=False)
+app = typer.Typer(help="Shimo - the CloudCost Analyzer agent for AWS, Azure, GCP and DigitalOcean", no_args_is_help=True, add_completion=False)
 console = Console()
 
 PROVIDER_LABELS = {"aws": "AWS", "azure": "Azure", "gcp": "GCP (Google Cloud)", "digitalocean": "DigitalOcean"}
@@ -97,8 +97,8 @@ class ToolProgress:
 def print_banner() -> None:
     console.print(
         Panel.fit(
-            f"[bold cyan]SHIMO[/bold cyan] Multi-Cloud Cost Analysis Agent v{settings.app_version}\n"
-            "[dim]4-layer memory · AWS · Azure · GCP · DigitalOcean[/dim]",
+            f"[bold cyan]SHIMO[/bold cyan] · {settings.app_name} v{settings.app_version}\n"
+            "[dim]AI multi-cloud cost analysis · 4-layer memory · AWS · Azure · GCP · DigitalOcean[/dim]",
             border_style="cyan",
         )
     )

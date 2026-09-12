@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Download, Layers, PanelLeft } from 'lucide-react';
+import { Download, Layers, PanelLeft, ClipboardCopy } from 'lucide-react';
 import type {
   CloudProvider,
   HealthStatus,
@@ -13,6 +13,9 @@ import SessionSidebar from './components/SessionSidebar';
 import SessionSetup, { type SessionSetupState } from './components/SessionSetup';
 import ChatInput from './components/ChatInput';
 import MessageList from './components/MessageList';
+import EmptyState from './components/EmptyState';
+import CopyButton from './components/CopyButton';
+import { conversationToMarkdown } from './utils/format';
 import {
   ApiError,
   compressSession,
@@ -23,6 +26,7 @@ import {
   fetchProviders,
   fetchSuggestions,
   getMessages,
+  getSession,
   listSessions,
   normalizeAnalysis,
   sendChat,
@@ -56,6 +60,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [setup, setSetup] = useState<SessionSetupState>({ name: '', providers: ['aws'], llm: 'bedrock', context: {} });
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -97,6 +102,7 @@ export default function App() {
   const selectSession = useCallback(async (session: SessionSummary) => {
     setActiveSession(session);
     setNotice(null);
+    setDrawerOpen(false);
     setHistoryLoading(true);
     try {
       const history = await getMessages(session.id);
@@ -109,10 +115,20 @@ export default function App() {
     }
   }, []);
 
+  // Deep link: /?session=<id> opens that session directly.
+  useEffect(() => {
+    const id = new URLSearchParams(window.location.search).get('session');
+    if (!id) return;
+    getSession(id)
+      .then((session) => void selectSession(session))
+      .catch(() => setNotice(`Session ${id} was not found`));
+  }, [selectSession]);
+
   const startNewSession = useCallback(() => {
     setActiveSession(null);
     setMessages([]);
     setNotice(null);
+    setDrawerOpen(false);
   }, []);
 
   const ensureSession = useCallback(async (): Promise<SessionSummary> => {
@@ -215,7 +231,23 @@ export default function App() {
     : [];
 
   return (
-    <DashboardLayout health={health} providers={providerStatus}>
+    <DashboardLayout health={health} providers={providerStatus} onMenu={() => setDrawerOpen(true)}>
+      {drawerOpen && (
+        <div className="fixed inset-0 z-[60] lg:hidden">
+          <div className="absolute inset-0 bg-slate-950/70 backdrop-blur-sm" onClick={() => setDrawerOpen(false)} />
+          <div className="absolute inset-y-0 left-0 w-80 max-w-[85vw] p-3">
+            <SessionSidebar
+              sessions={sessions}
+              activeId={activeSession?.id ?? null}
+              loading={sessionsLoading}
+              onSelect={(s) => void selectSession(s)}
+              onNew={startNewSession}
+              onDelete={(s) => void handleDelete(s)}
+              onClose={() => setDrawerOpen(false)}
+            />
+          </div>
+        </div>
+      )}
       <div className="flex gap-4 h-[calc(100dvh-132px)]">
         {sidebarOpen && (
           <div className="hidden lg:block w-72 flex-shrink-0">
@@ -231,7 +263,7 @@ export default function App() {
         )}
 
         <div className="flex flex-col flex-1 min-w-0 gap-3">
-          <div className="flex items-center gap-2 text-xs text-slate-400">
+          <div className="flex items-center gap-2 text-xs text-slate-400 whitespace-nowrap">
             <button
               type="button"
               onClick={() => setSidebarOpen((v) => !v)}
@@ -242,14 +274,21 @@ export default function App() {
             </button>
             {activeSession ? (
               <>
-                <span className="text-slate-200 font-medium truncate">{activeSession.name}</span>
-                <span className="text-slate-600">·</span>
-                <span>{activeProviders.join(', ')}</span>
-                <span className="text-slate-600">·</span>
-                <span>{activeSession.llm_provider}</span>
-                <span className="text-slate-600">·</span>
-                <span>{activeSession.message_count} messages</span>
-                <span className="ml-auto flex items-center gap-2">
+                <span className="text-slate-200 font-medium truncate max-w-[40vw] sm:max-w-none">{activeSession.name}</span>
+                <span className="hidden md:inline text-slate-600">·</span>
+                <span className="hidden md:inline">{activeProviders.join(', ')}</span>
+                <span className="hidden md:inline text-slate-600">·</span>
+                <span className="hidden md:inline">{activeSession.llm_provider}</span>
+                <span className="hidden lg:inline text-slate-600">·</span>
+                <span className="hidden lg:inline">{activeSession.message_count} messages</span>
+                <span className="ml-auto flex items-center gap-2 flex-shrink-0">
+                  <CopyButton
+                    text={() => conversationToMarkdown(messages, activeSession.name)}
+                    label="Copy chat"
+                    icon={<ClipboardCopy className="w-3.5 h-3.5" />}
+                    successMessage="Conversation copied as Markdown"
+                    title="Copy the whole conversation as Markdown"
+                  />
                   <button
                     type="button"
                     onClick={() => void handleCompress()}
@@ -291,22 +330,11 @@ export default function App() {
             />
           )}
 
-          <div className="flex-1 overflow-y-auto custom-scrollbar rounded-2xl border border-slate-800 bg-slate-950/50 backdrop-blur px-4 py-4">
+          <div className="glass flex-1 overflow-y-auto custom-scrollbar rounded-2xl px-4 py-4">
             {historyLoading ? (
               <p className="text-sm text-slate-500">Loading history…</p>
             ) : messages.length === 0 ? (
-              <div className="flex flex-col items-center justify-center h-full text-center">
-                <div className="size-16 rounded-2xl bg-primary-600/10 border border-primary-500/30 flex items-center justify-center mb-4">
-                  <svg className="w-8 h-8 text-primary-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z" />
-                  </svg>
-                </div>
-                <h2 className="text-lg font-semibold text-slate-100 mb-2">Ask Shimo about your cloud spend</h2>
-                <p className="text-sm text-slate-400 max-w-md">
-                  Shimo calls your cloud billing APIs, remembers the conversation across turns, and returns
-                  breakdowns, trends and optimisation recommendations.
-                </p>
-              </div>
+              <EmptyState />
             ) : (
               <MessageList messages={messages} />
             )}

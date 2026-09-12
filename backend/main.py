@@ -1,4 +1,4 @@
-"""Shimo backend - FastAPI application entry point.
+"""CloudCost Analyzer backend (Shimo agent) - FastAPI application entry point.
 
 Run from the repository root::
 
@@ -50,7 +50,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title=settings.app_name,
-    description="Shimo - multi-cloud cost analytics with a memory-aware AI agent",
+    description=settings.app_tagline,
     version=settings.app_version,
     docs_url="/docs",
     redoc_url="/redoc",

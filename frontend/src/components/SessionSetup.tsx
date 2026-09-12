@@ -50,7 +50,7 @@ export default function SessionSetup({ value, onChange, providerStatus, llmProvi
   };
 
   return (
-    <section className="rounded-2xl border border-primary-500/40 bg-slate-950/90 shadow-lg shadow-primary-900/20 backdrop-blur px-4 py-4">
+    <section className="glass rounded-2xl px-4 py-4 border-primary-500/30">
       <div className="flex items-center justify-between gap-3 mb-3">
         <h2 className="text-base font-semibold text-slate-100">New session</h2>
         <span className="text-xs text-primary-300">Pick the clouds to analyse, then ask a question</span>
@@ -98,7 +98,7 @@ export default function SessionSetup({ value, onChange, providerStatus, llmProvi
                 onClick={() => toggleProvider(name)}
                 className={`inline-flex items-center gap-2 rounded-xl border px-3 py-1.5 text-sm transition-colors disabled:opacity-50 ${
                   checked
-                    ? 'border-primary-500 bg-primary-600/20 text-primary-100'
+                    ? 'border-primary-500/70 bg-primary-600/20 text-primary-100 shadow-glow'
                     : 'border-slate-700 bg-slate-900 text-slate-300 hover:border-slate-500'
                 }`}
                 aria-pressed={checked}

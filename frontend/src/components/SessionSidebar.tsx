@@ -1,4 +1,4 @@
-import { Plus, Trash2, MessageSquare, Layers } from 'lucide-react';
+import { Plus, Trash2, MessageSquare, Layers, X } from 'lucide-react';
 import type { SessionSummary } from '../types';
 
 interface SessionSidebarProps {
@@ -8,6 +8,7 @@ interface SessionSidebarProps {
   onSelect: (session: SessionSummary) => void;
   onNew: () => void;
   onDelete: (session: SessionSummary) => void;
+  onClose?: () => void;
 }
 
 const PROVIDER_SHORT: Record<string, string> = { aws: 'AWS', azure: 'AZ', gcp: 'GCP', digitalocean: 'DO' };
@@ -19,18 +20,25 @@ function formatDate(value: string): string {
     ' ' + date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 }
 
-export default function SessionSidebar({ sessions, activeId, loading, onSelect, onNew, onDelete }: SessionSidebarProps) {
+export default function SessionSidebar({ sessions, activeId, loading, onSelect, onNew, onDelete, onClose }: SessionSidebarProps) {
   return (
-    <aside className="flex flex-col h-full rounded-2xl border border-slate-800 bg-slate-950/60 backdrop-blur overflow-hidden">
+    <aside className="glass flex flex-col h-full rounded-2xl overflow-hidden">
       <div className="flex items-center justify-between px-3 py-3 border-b border-slate-800/70">
         <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Sessions</span>
-        <button
-          type="button"
-          onClick={onNew}
-          className="inline-flex items-center gap-1 text-xs bg-primary-600 hover:bg-primary-500 text-white px-2.5 py-1.5 rounded-lg transition-colors"
-        >
-          <Plus className="w-3.5 h-3.5" /> New
-        </button>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={onNew}
+            className="brand-gradient inline-flex items-center gap-1 text-xs text-white px-2.5 py-1.5 rounded-lg hover:opacity-90 transition-opacity"
+          >
+            <Plus className="w-3.5 h-3.5" /> New
+          </button>
+          {onClose && (
+            <button type="button" onClick={onClose} className="lg:hidden inline-flex size-7 items-center justify-center rounded-lg text-slate-400 hover:text-slate-100" aria-label="Close">
+              <X className="w-4 h-4" />
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1">
@@ -48,7 +56,7 @@ export default function SessionSidebar({ sessions, activeId, loading, onSelect, 
               key={session.id}
               className={`group relative rounded-xl border px-3 py-2.5 cursor-pointer transition-colors ${
                 active
-                  ? 'border-primary-500/60 bg-primary-600/15'
+                  ? 'border-primary-500/60 bg-primary-600/15 shadow-inner'
                   : 'border-transparent hover:border-slate-700 hover:bg-slate-900/60'
               }`}
               onClick={() => onSelect(session)}
@@ -62,7 +70,7 @@ export default function SessionSidebar({ sessions, activeId, loading, onSelect, 
                   type="button"
                   aria-label="Archive session"
                   onClick={(e) => { e.stopPropagation(); onDelete(session); }}
-                  className="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-red-400 transition-opacity"
+                  className="opacity-60 sm:opacity-0 sm:group-hover:opacity-100 text-slate-500 hover:text-red-400 transition-opacity"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                 </button>

@@ -1,8 +1,62 @@
-# Shimo - Multi-Cloud Cost Analysis Agent
+# CloudCost Analyzer - AI Multi-Cloud Cost Analysis & FinOps Agent
 
-**Shimo** is an AI agent that answers natural-language questions about your cloud spend across **AWS, Azure, GCP and DigitalOcean**. It calls the real billing APIs through tools, keeps a **4-layer memory** so long sessions stay coherent, persists every session to a database, and is available as an interactive **CLI** and a **web chat** with charts.
+> **Natural-language cloud cost analysis for AWS, Azure, GCP and DigitalOcean.** Ask *"what did I spend on EC2 this month?"* or *"compare my Azure and GCP bills and tell me where to save"* and get real numbers from your billing APIs, charts, trends, forecasts and optimization recommendations. Powered by **Shimo**, a memory-aware AI agent, available as a CLI (`shimo`) and a web chat.
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![React](https://img.shields.io/badge/React-19-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-green) ![Strands](https://img.shields.io/badge/Strands_Agents-1.55-purple) ![Clouds](https://img.shields.io/badge/AWS_Azure_GCP_DO-multi--cloud-orange)
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![React](https://img.shields.io/badge/React-19-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-green) ![Strands](https://img.shields.io/badge/Strands_Agents-1.55-purple) [![License: MIT](https://img.shields.io/badge/license-MIT-7c96ff.svg)](LICENSE) ![Clouds](https://img.shields.io/badge/AWS_%7C_Azure_%7C_GCP_%7C_DigitalOcean-multi--cloud-orange)
+
+**Keywords:** cloud cost analyzer · FinOps · AWS Cost Explorer · Azure Cost Management · GCP billing export · DigitalOcean billing · multi-cloud cost optimization · AI agent · LLM · Bedrock · Claude · OpenAI · Gemini · Ollama
+
+## Screenshots
+
+<p align="center">
+  <img src="docs/screenshots/web-analysis.png" alt="CloudCost Analyzer web chat showing a multi-cloud cost breakdown with charts, service table and optimization recommendations" width="900">
+</p>
+<p align="center"><em>Web chat: multi-cloud cost breakdown across AWS, Azure and GCP with per-provider totals, charts, service table and copyable recommendations.</em></p>
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/web-forecast.png" alt="Cost forecast for the rest of the month rendered as an area chart"></td>
+    <td width="50%"><img src="docs/screenshots/web-new-session.png" alt="New session setup: choose cloud providers, account identifiers and LLM"></td>
+  </tr>
+  <tr>
+    <td align="center"><em>Forecast turn with time-series chart</em></td>
+    <td align="center"><em>New session: pick providers, accounts and LLM</em></td>
+  </tr>
+</table>
+
+<p align="center">
+  <img src="docs/screenshots/cli-shimo-chat.png" alt="shimo CLI rendering a cost analysis with a service table, trend bars and recommendations in the terminal" width="900">
+</p>
+<p align="center"><em>The <code>shimo</code> CLI: same agent, same memory, rendered with Rich in the terminal.</em></p>
+
+## Table of contents
+
+- [Screenshots](#screenshots)
+- [Why CloudCost Analyzer](#why-cloudcost-analyzer)
+- [Features](#features)
+- [Architecture](#architecture)
+- [Quick start](#quick-start)
+- [CLI (`shimo`)](#cli)
+- [Web chat](#web-chat)
+- [API](#api)
+- [Configuration](#configuration)
+- [Project structure](#project-structure)
+- [Development](#development)
+- [FAQ](#faq)
+- [Security notes](#security-notes)
+
+## Why CloudCost Analyzer
+
+Cloud bills are spread across four consoles, dozens of services and thousands of line items. CloudCost Analyzer turns that into a conversation:
+
+| You ask | Shimo does |
+|---|---|
+| "What is my AWS spend this month by service?" | Calls Cost Explorer, returns a ranked breakdown with shares and a chart |
+| "Show the daily GCP cost trend for the last 30 days" | Queries the BigQuery billing export and plots the trend |
+| "Compare Azure and DigitalOcean costs" | Pulls both providers and produces per-provider totals |
+| "Forecast next month and tell me where to save" | Uses the cost forecast API and returns concrete recommendations |
+
+Sessions are persisted, resumable and compressed automatically, so a month-long cost review stays coherent.
 
 ## Features
 
@@ -12,7 +66,7 @@
 - **GCP** - BigQuery billing export by service and by day, Cloud Billing account info, Cloud Asset inventory (service account or ADC)
 - **DigitalOcean** - balance and invoices, monthly trend, resource run-rate estimate
 
-**Agent harness**
+**Shimo agent harness**
 - Strands Agents loop with per-session tools: only the providers enabled for a session are exposed to the model
 - Structured JSON answers (summary, totals, per-provider totals, service breakdown, time series, recommendations, chart hint) rendered as charts in the web UI and tables in the CLI
 - Graceful failures: tool errors are reported in the answer, model outages are recorded as an error turn instead of crashing
@@ -27,30 +81,15 @@
 
 **Interfaces**
 - **CLI** (`shimo`) - setup wizard, interactive chat with `/memory`, `/compress`, `/export`, one-shot `shimo ask`, session management
-- **Web chat** - React 19 + Recharts; sessions sidebar, resume with full history, provider/LLM setup, compress and export
+- **Web chat** - React 19 + Recharts; sessions sidebar, resume with full history, provider/LLM setup, compress and export, one-click copy of answers, tables, JSON and whole conversations as Markdown
 - **REST API** - sessions, chat, messages, analysis cache, compression, export, provider status
 
 ## Architecture
 
-```
-┌────────────────────┐    ┌──────────────────────┐
-│  CLI (Typer/Rich)  │    │  Web chat (React)    │
-└─────────┬──────────┘    └──────────┬───────────┘
-          │ AgentHarness             │ HTTP /api
-          ▼                          ▼
-┌──────────────────────────────────────────────────────┐
-│ FastAPI backend                                      │
-│  ┌──────────────── AgentHarness ─────────────────┐   │
-│  │ MemoryManager (hot · cold · procedural · deep)│   │
-│  │ Strands Agent  ── tools for enabled providers │   │
-│  │ SessionStore   ── sessions · messages · users │   │
-│  └───────────────────────────────────────────────┘   │
-│        │ LLM (Bedrock/Anthropic/OpenAI/Gemini/…)     │
-│        │ AWS CE · Azure CM · GCP BigQuery · DO API   │
-└────────┼─────────────────────────────────────────────┘
-         ▼
-   SQLite / any SQLAlchemy DB (sessions, session_messages, user_profiles)
-```
+<p align="center">
+  <img src="docs/architecture.png" alt="CloudCost Analyzer architecture: CLI and web chat call the AgentHarness, which combines the 4-layer MemoryManager, the Strands agent loop with per-provider cost tools, and the SessionStore backed by SQLite; the agent talks to the configured LLM and to AWS, Azure, GCP and DigitalOcean billing APIs" width="900">
+</p>
+<p align="center"><em>Editable source: <a href="docs/architecture.excalidraw">docs/architecture.excalidraw</a> (open at excalidraw.com) · <a href="docs/architecture.svg">SVG</a></em></p>
 
 Every query goes through the same path: memory assembles the prompt (system rules + connected accounts + recalled history + skills), the agent calls tools and answers in JSON, the harness normalises the answer, records it in memory and the database, and compresses history when needed.
 
@@ -64,8 +103,8 @@ Every query goes through the same path: memory assembles the prompt (system rule
 ### 1. Configure
 
 ```bash
-git clone https://github.com/Faizullah9181/Cloud-Analytics.git shimo
-cd shimo
+git clone https://github.com/Faizullah9181/cloudcost-analyzer.git cloudcost-analyzer
+cd cloudcost-analyzer
 cp .env.example .env      # then edit .env
 ```
 
@@ -110,10 +149,12 @@ uv run shimo chat
 
 ## CLI
 
+The CLI is called `shimo`, after the agent.
+
 ```
 $ shimo chat
 ╭──────────────────────────────────────────────────╮
-│ SHIMO Multi-Cloud Cost Analysis Agent v2.1.0     │
+│ SHIMO · CloudCost Analyzer v2.2.0                │
 ╰──────────────────────────────────────────────────╯
 Session name [Session 2025-09-10 14:02]: Q3 review
 Step 1 · Cloud providers
@@ -153,7 +194,8 @@ Secrets entered in the wizard (API tokens, access keys) are applied to the runni
 
 1. Open the UI, pick the providers to analyse, optionally enter account identifiers, choose the LLM.
 2. Ask a question. The first message creates a session; every turn is persisted.
-3. Switch sessions in the sidebar to resume with full history; use **Compress** to summarise a long session and **Export** to download it.
+3. Switch sessions in the sidebar to resume with full history; use **Compress** to summarise a long session, **Export** to download it and **Copy chat** to copy the whole conversation as Markdown.
+4. Every answer has copy buttons for the summary, a Markdown report, the service table and the raw analysis JSON. The input supports Enter to send, Shift+Enter for new lines and paste-from-clipboard.
 
 ## API
 
@@ -204,7 +246,7 @@ GCP cost tools read the standard BigQuery billing export (`gcp_billing_export_v1
 ## Project structure
 
 ```
-shimo/
+cloudcost-analyzer/
 ├── backend/
 │   ├── main.py                 FastAPI app (uvicorn backend.main:app)
 │   ├── shimo_cli.py            `shimo` CLI
@@ -244,12 +286,30 @@ cd frontend && npm run lint && npm run typecheck && npm run build
 3. Add the provider to `SUPPORTED_CLOUD_PROVIDERS`, `Settings.provider_status()` and the connection block in `backend/agents/prompts.py`.
 4. Add the enum member to `backend/memory/hot_memory.py` and a skill in `procedural_memory.py`.
 
+## FAQ
+
+**Does it work with only one cloud?** Yes. Enable just the providers you have credentials for; the agent only sees those tools.
+
+**Which AWS permissions are needed?** Read-only: `ce:GetCostAndUsage`, `ce:GetCostForecast`, and optionally `organizations:ListAccounts`, `ec2:DescribeInstances`, `rds:DescribeDBInstances`, `s3:ListAllMyBuckets`, `lambda:ListFunctions` for inventory.
+
+**How does GCP cost data work?** Through the standard BigQuery billing export (`gcp_billing_export_v1_*`). Enable the export in the Cloud Console and set `GCP_BILLING_DATASET`.
+
+**Can I run it fully locally?** Yes: `LLM_PROVIDER=ollama` with a local model, SQLite storage, and no data leaves your machine except calls to your own cloud billing APIs.
+
+**Is my billing data sent to the LLM?** Tool results (aggregated cost figures) are passed to the configured model so it can answer. Choose a provider you trust or run Ollama locally.
+
+**Why "Shimo"?** Shimo is the name of the agent and the CLI; CloudCost Analyzer is the product.
+
 ## Security notes
 
 - Cloud and LLM secrets are read from the environment and never written to the database or exports. Sessions store only identifiers (account, subscription, project, region).
 - Secrets entered in the CLI wizard live in the process for that run only.
 - Restrict `CORS_ORIGINS` and put the API behind authentication before exposing it beyond localhost; the API itself is unauthenticated.
 
+## Repository topics
+
+See `.github/REPO_METADATA.md` for the GitHub description, topics and social preview used to keep the project discoverable.
+
 ## License
 
-MIT
+CloudCost Analyzer is available under the [MIT License](LICENSE).

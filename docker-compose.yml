@@ -1,9 +1,12 @@
+
+name: cloudcost-analyzer
+
 services:
   backend:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    container_name: shimo-backend
+    container_name: cloudcost-backend
     ports:
       - "8001:8000"
     env_file:
@@ -18,13 +21,13 @@ services:
       - ./data:/app/data
     restart: unless-stopped
     networks:
-      - shimo-network
+      - cloudcost-network
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    container_name: shimo-frontend
+    container_name: cloudcost-frontend
     ports:
       - "5035:80"
     depends_on:
@@ -32,8 +35,8 @@ services:
         condition: service_healthy
     restart: unless-stopped
     networks:
-      - shimo-network
+      - cloudcost-network
 
 networks:
-  shimo-network:
+  cloudcost-network:
     driver: bridge

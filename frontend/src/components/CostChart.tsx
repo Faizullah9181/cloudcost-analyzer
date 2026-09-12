@@ -59,6 +59,7 @@ function renderChart(
           outerRadius={90}
           paddingAngle={2}
           dataKey="value"
+          isAnimationActive={false}
           labelLine={false}
           fontSize={10}
           label={({ name, percent }) => `${String(name).split(' ').slice(-1)[0]} ${((percent ?? 0) * 100).toFixed(0)}%`}
@@ -78,7 +79,7 @@ function renderChart(
         <XAxis type="number" tick={{ fill: '#9ca3af', fontSize: 11 }} tickFormatter={(v) => `${v}`} />
         <YAxis type="category" dataKey="name" tick={{ fill: '#9ca3af', fontSize: 11 }} width={110} />
         <Tooltip {...tooltipStyle} formatter={(value) => [format(value), 'Cost']} />
-        <Bar dataKey="cost" radius={[0, 4, 4, 0]}>
+        <Bar dataKey="cost" radius={[0, 4, 4, 0]} isAnimationActive={false}>
           {data.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
         </Bar>
       </BarChart>
@@ -96,9 +97,9 @@ function renderChart(
         <Tooltip {...tooltipStyle} formatter={(value) => [format(value), 'Cost']} />
         <Legend />
         {type === 'area' ? (
-          <Area type="monotone" dataKey="cost" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.15} strokeWidth={2} />
+          <Area type="monotone" dataKey="cost" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.15} strokeWidth={2} isAnimationActive={false} />
         ) : (
-          <Line type="monotone" dataKey="cost" stroke="#3b82f6" strokeWidth={2} dot={{ fill: '#3b82f6', r: 3 }} />
+          <Line type="monotone" dataKey="cost" stroke="#3b82f6" strokeWidth={2} dot={{ fill: '#3b82f6', r: 3 }} isAnimationActive={false} />
         )}
       </Chart>
     );
@@ -112,7 +113,7 @@ function renderChart(
         <XAxis dataKey="name" tick={{ fill: '#9ca3af', fontSize: 10 }} angle={-20} textAnchor="end" height={60} />
         <YAxis tick={{ fill: '#9ca3af', fontSize: 11 }} tickFormatter={(v) => `${v}`} />
         <Tooltip {...tooltipStyle} formatter={(value) => [format(value), 'Cost']} />
-        <Bar dataKey="cost" radius={[4, 4, 0, 0]}>
+        <Bar dataKey="cost" radius={[4, 4, 0, 0]} isAnimationActive={false}>
           {data.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
         </Bar>
       </BarChart>

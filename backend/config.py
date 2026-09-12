@@ -38,8 +38,10 @@ class Settings(BaseSettings):
         populate_by_name=True,
     )
 
-    app_name: str = "Shimo"
-    app_version: str = "2.1.0"
+    app_name: str = "CloudCost Analyzer"
+    app_tagline: str = "AI-powered multi-cloud cost analysis (AWS, Azure, GCP, DigitalOcean) by the Shimo agent"
+    agent_name: str = "Shimo"
+    app_version: str = "2.2.0"
     debug: bool = False
     log_level: str = "INFO"
 

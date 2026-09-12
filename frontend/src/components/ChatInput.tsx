@@ -1,5 +1,7 @@
-import { useState, type FormEvent } from 'react';
-import { Send, Loader2 } from 'lucide-react';
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
+import { Send, Loader2, ClipboardPaste, Sparkles } from 'lucide-react';
+import { canReadClipboard, readClipboardText } from '../utils/clipboard';
+import { useToast } from '../hooks/useToast';
 
 interface ChatInputProps {
   onSubmit: (query: string) => void;
@@ -10,13 +12,43 @@ interface ChatInputProps {
 
 export default function ChatInput({ onSubmit, loading, suggestions, placeholder }: ChatInputProps) {
   const [query, setQuery] = useState('');
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const { notify } = useToast();
 
-  const handleSubmit = (e: FormEvent) => {
-    e.preventDefault();
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 180)}px`;
+  }, [query]);
+
+  const submit = () => {
     const trimmed = query.trim();
     if (!trimmed || loading) return;
     onSubmit(trimmed);
     setQuery('');
+  };
+
+  const handleSubmit = (e: FormEvent) => {
+    e.preventDefault();
+    submit();
+  };
+
+  const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      submit();
+    }
+  };
+
+  const handlePaste = async () => {
+    const text = await readClipboardText();
+    if (text === null) {
+      notify('Clipboard read is not permitted here. Use Ctrl/Cmd+V instead.', 'info');
+      return;
+    }
+    setQuery((prev) => (prev ? `${prev}${prev.endsWith(' ') ? '' : ' '}${text}` : text));
+    textareaRef.current?.focus();
   };
 
   return (
@@ -29,32 +61,48 @@ export default function ChatInput({ onSubmit, loading, suggestions, placeholder 
               type="button"
               onClick={() => onSubmit(s)}
               disabled={loading}
-              className="text-xs bg-slate-900 hover:bg-slate-800 text-slate-300 px-3 py-1.5 rounded-full border border-slate-700 transition-colors disabled:opacity-50"
+              className="group inline-flex items-center gap-1.5 text-xs glass hover:border-primary-500/60 text-slate-300 hover:text-slate-100 px-3 py-1.5 rounded-full transition-colors disabled:opacity-50"
             >
+              <Sparkles className="w-3 h-3 text-primary-400 group-hover:text-primary-300" />
               {s}
             </button>
           ))}
         </div>
       )}
 
-      <form onSubmit={handleSubmit} className="flex gap-3 rounded-2xl border border-slate-800 bg-slate-950/70 backdrop-blur p-3">
-        <input
-          type="text"
+      <form onSubmit={handleSubmit} className="glass flex items-end gap-2 rounded-2xl p-2 pl-3 focus-within:border-primary-500/60 focus-within:shadow-glow transition-shadow">
+        <textarea
+          ref={textareaRef}
+          rows={1}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={handleKeyDown}
           placeholder={placeholder ?? "Ask about your cloud costs… e.g. 'Compare my AWS and Azure spend this month'"}
           disabled={loading}
-          className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent disabled:opacity-50 text-sm"
+          className="flex-1 resize-none bg-transparent py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none disabled:opacity-50 max-h-44 custom-scrollbar"
         />
+        {canReadClipboard && (
+          <button
+            type="button"
+            onClick={() => void handlePaste()}
+            disabled={loading}
+            title="Paste from clipboard"
+            aria-label="Paste from clipboard"
+            className="mb-0.5 inline-flex size-9 items-center justify-center rounded-xl text-slate-400 hover:text-slate-100 hover:bg-slate-800/80 transition-colors disabled:opacity-50"
+          >
+            <ClipboardPaste className="w-4 h-4" />
+          </button>
+        )}
         <button
           type="submit"
           disabled={loading || !query.trim()}
-          className="bg-primary-600 hover:bg-primary-500 disabled:bg-slate-700 disabled:cursor-not-allowed text-white px-5 py-3 rounded-xl flex items-center gap-2 transition-colors font-medium text-sm"
+          className="mb-0.5 brand-gradient hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed text-white px-4 py-2 rounded-xl flex items-center gap-2 transition-opacity font-medium text-sm"
         >
           {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-          Analyze
+          <span className="hidden sm:inline">Analyze</span>
         </button>
       </form>
+      <p className="mt-1.5 px-2 text-[11px] text-slate-600">Enter to send · Shift+Enter for a new line</p>
     </div>
   );
 }

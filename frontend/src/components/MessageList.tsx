@@ -1,6 +1,8 @@
 import type { Message } from '../types';
 import AnalysisCard from './AnalysisCard';
-import { User, Bot, Loader2, Wrench, AlertTriangle, Layers } from 'lucide-react';
+import CopyButton from './CopyButton';
+import { messageToMarkdown } from '../utils/format';
+import { User, Bot, Wrench, AlertTriangle, Layers, FileText } from 'lucide-react';
 
 interface MessageListProps {
   messages: Message[];
@@ -22,37 +24,41 @@ export default function MessageList({ messages }: MessageListProps) {
 
         const isUser = msg.role === 'user';
         return (
-          <div key={msg.id} className={`flex gap-3 animate-fade-in ${isUser ? 'justify-end' : ''}`}>
+          <div key={msg.id} className={`group flex gap-3 animate-fade-in ${isUser ? 'justify-end' : ''}`}>
             {!isUser && (
-              <div className="w-8 h-8 rounded-lg bg-primary-600/20 flex items-center justify-center flex-shrink-0 mt-1">
-                <Bot className="w-4 h-4 text-primary-400" />
+              <div className="brand-gradient w-8 h-8 rounded-xl flex items-center justify-center flex-shrink-0 mt-1 shadow-lg shadow-primary-900/30">
+                <Bot className="w-4 h-4 text-white" />
               </div>
             )}
 
-            <div className={`max-w-[85%] min-w-0 ${isUser ? 'order-first' : 'flex-1'}`}>
+            <div className={`max-w-[88%] min-w-0 ${isUser ? 'order-first' : 'flex-1'}`}>
               {isUser ? (
-                <div className="bg-primary-600/20 border border-primary-500/20 rounded-xl px-4 py-3">
-                  <p className="text-sm text-gray-200 whitespace-pre-wrap">{msg.content}</p>
+                <div className="rounded-2xl rounded-tr-md border border-primary-500/30 bg-primary-600/15 px-4 py-3">
+                  <p className="text-sm text-slate-100 whitespace-pre-wrap">{msg.content}</p>
                 </div>
               ) : msg.loading ? (
-                <div className="bg-gray-800/50 rounded-xl px-4 py-3 border border-gray-700/50 flex items-center gap-2">
-                  <Loader2 className="w-4 h-4 animate-spin text-primary-400" />
-                  <span className="text-sm text-gray-400">Analyzing your cloud costs…</span>
+                <div className="glass rounded-2xl rounded-tl-md px-4 py-3 flex items-center gap-3">
+                  <span className="flex items-center gap-1">
+                    <span className="typing-dot size-1.5 rounded-full bg-primary-400" />
+                    <span className="typing-dot size-1.5 rounded-full bg-primary-400" />
+                    <span className="typing-dot size-1.5 rounded-full bg-primary-400" />
+                  </span>
+                  <span className="text-sm text-slate-400">Shimo is querying your cloud billing data…</span>
                 </div>
               ) : msg.error ? (
-                <div className="bg-red-950/40 rounded-xl px-4 py-3 border border-red-800/50 flex items-start gap-2">
+                <div className="rounded-2xl rounded-tl-md border border-red-800/50 bg-red-950/40 px-4 py-3 flex items-start gap-2">
                   <AlertTriangle className="w-4 h-4 text-red-400 mt-0.5 flex-shrink-0" />
                   <p className="text-sm text-red-200 whitespace-pre-wrap">{msg.content}</p>
                 </div>
               ) : msg.data ? (
                 <AnalysisCard data={msg.data} />
               ) : (
-                <div className="bg-gray-800/50 rounded-xl px-4 py-3 border border-gray-700/50">
-                  <p className="text-sm text-gray-200 whitespace-pre-wrap">{msg.content}</p>
+                <div className="glass rounded-2xl rounded-tl-md px-4 py-3">
+                  <p className="text-sm text-slate-200 whitespace-pre-wrap">{msg.content}</p>
                 </div>
               )}
 
-              <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-gray-600">
+              <div className={`mt-1.5 flex flex-wrap items-center gap-2 text-[10px] text-slate-600 ${isUser ? 'justify-end' : ''}`}>
                 <span>{msg.timestamp.toLocaleTimeString()}</span>
                 {msg.toolCalls?.map((call) => (
                   <span key={call.tool} className="inline-flex items-center gap-1 rounded-full border border-slate-800 px-2 py-0.5 text-slate-500">
@@ -60,12 +66,25 @@ export default function MessageList({ messages }: MessageListProps) {
                     {call.tool}{call.calls > 1 ? ` ×${call.calls}` : ''}
                   </span>
                 ))}
+                {!msg.loading && (
+                  <span className="inline-flex gap-1 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
+                    <CopyButton text={msg.content} title="Copy text" successMessage="Message copied" />
+                    {!isUser && msg.data && (
+                      <CopyButton
+                        text={() => messageToMarkdown(msg)}
+                        icon={<FileText className="w-3.5 h-3.5" />}
+                        title="Copy as Markdown"
+                        successMessage="Markdown copied"
+                      />
+                    )}
+                  </span>
+                )}
               </div>
             </div>
 
             {isUser && (
-              <div className="w-8 h-8 rounded-lg bg-gray-700 flex items-center justify-center flex-shrink-0 mt-1">
-                <User className="w-4 h-4 text-gray-400" />
+              <div className="w-8 h-8 rounded-xl bg-slate-800 border border-slate-700 flex items-center justify-center flex-shrink-0 mt-1">
+                <User className="w-4 h-4 text-slate-300" />
               </div>
             )}
           </div>
